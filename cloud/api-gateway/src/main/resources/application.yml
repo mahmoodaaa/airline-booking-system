@@ -1,0 +1,40 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+
+  security:
+    user:
+      password: disabled
+
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+
+            - id: auth-service
+              uri: http://localhost:7171
+              predicates:
+                - Path=/api/auth/**
+
+            - id: flight-service
+              uri: http://localhost:7172
+              predicates:
+                - Path=/api/flights/**,/api/airports/**,/api/aircraft/**
+
+            - id: booking-service
+              uri: http://localhost:7173
+              predicates:
+                - Path=/api/bookings/**
+
+jwt:
+  secret: ${JWT_SECRET}
+
+logging:
+  level:
+    com.project.apigateway: DEBUG
+    org.springframework.cloud.gateway: DEBUG
+    org.springframework.cloud.gateway.route: TRACE

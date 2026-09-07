@@ -1,0 +1,22 @@
+# Build
+target/
+**/target/
+
+# IntelliJ
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+
+# Environment / Secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
