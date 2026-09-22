@@ -1,0 +1,2 @@
+jwt:
+  secret: YOUR_LOCAL_JWT_SECRET
