@@ -18,11 +18,18 @@ import org.springframework.data.domain.Pageable;
 
 public interface FlightService {
     FlightResponse createFlight(FlightRequest request);
+
     FlightResponse getFlightById(UUID id);
+
     Page<FlightResponse> getAllFlights(Pageable pageable);
+
     List<FlightSearchResponse> searchFlights(String origin, String destination, LocalDate date);
+
     AvailabilityResponse getAvailability(UUID flightId);
+
     FlightResponse updateFlightStatus(UUID id, UpdateFlightStatusRequest request);
+
     SeatReservationResponse reserveSeats(UUID flightId, UUID fareClassId, int count);
+
     void releaseSeats(UUID flightId, UUID fareClassId, int count);
 }

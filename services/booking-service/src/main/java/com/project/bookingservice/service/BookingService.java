@@ -36,5 +36,5 @@ public interface BookingService {
 
     com.project.bookingservice.dto.response.PaymentContextResponse getPaymentContext(UUID bookingId);
 
-    void confirmPayment(UUID bookingId, String paymentId);
+    void confirmPayment(UUID bookingId, UUID paymentId);
 }

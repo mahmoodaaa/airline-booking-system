@@ -1,6 +1,6 @@
 # Sprint 5 — Distributed Failure Matrix
 
-> **Status:** DRAFT — Phase Gate for Phase 3  
+> **Status:** FINALIZED — Phase 4 Domain Model locked  
 > **Rule:** Must be CLOSED before creating any Payment entity or DB schema.  
 > **Purpose:** Every scenario must have a known, deterministic outcome. If a row is unclear, it means the state machine is incomplete.
 
@@ -81,6 +81,9 @@ Attempt status short-codes: `INIT` = INITIALIZING, `UNK` = UNKNOWN
 | D7 | Concurrent duplicate webhooks (race) | one wins with UNIQUE constraint | one winner | paid | CONFIRMED once | one 200, one dedup (if PROCESSING → block) | no | no | no |
 | D8 | Booking confirmation — same `bookingId + paymentId` retry | unchanged | unchanged | paid | CONFIRMED | 200 idempotent | safe to retry | no | no |
 | D9 | Booking confirm — Booking returns 404 (deleted?) | SUCCEEDED | SUCCEEDED | paid | MISSING | 200 (money persisted) — CRITICAL log | no | yes — refund if definitive | yes |
+| D10 | **Sequential:** second distinct attempt reports success after another attempt is already canonical success | SUCCEEDED (canonical unchanged) | incoming attempt → SUCCEEDED (provider truth preserved) | two charges | CONFIRMED (already) | webhook: 200 (money truth persisted) | no | **YES — refund non-canonical attempt** | yes — CRITICAL log + reconciliation until refund resolved |
+| D11 | **Concurrent:** two distinct attempts report success simultaneously | SUCCEEDED (one winner via CAS) | winner → canonical; loser → SUCCEEDED (preserved) | two charges | CONFIRMED once | both webhooks: 200 | no | **YES — refund losing attempt** | yes — CRITICAL log |
+| D12 | **Stale-state correction:** previously locally terminal/unresolved attempt later has verified provider success, while another attempt is already canonical | SUCCEEDED (canonical unchanged) | stale attempt corrected to SUCCEEDED after Stripe verification | two charges | CONFIRMED (already) | webhook: 200 | no — verify Stripe first; do NOT correct local state from webhook alone | **YES — refund non-canonical attempt** | yes — CRITICAL log + reconciliation |
 
 ---
 
@@ -185,6 +188,42 @@ version
 - `clientIdempotencyKey` ❌ — belongs to `PaymentIdempotencyRecord`
 - `requestHash` ❌ — belongs to `PaymentIdempotencyRecord`
 
+**CRITICAL enum semantics (enforced in code via Javadoc):**
+- `UNKNOWN` = local network timeout / response lost. Provider truth unresolved. Must be reconciled via Stripe API lookup. **NEVER used for Stripe-confirmed session expiry.**
+- `EXPIRED` = Stripe confirmed the Checkout Session expired (via webhook or reconciliation). This is a Stripe business state, not a local timeout label.
+
+### ⑤-b `Payment.succeededAttemptId` — LOCKED (added Phase 4)
+
+```
+Payment answers two distinct questions:
+
+  status = SUCCEEDED
+  → "Did this logical Payment succeed?"
+
+  succeededAttemptId = <UUID>
+  → "Which provider attempt is the accepted canonical success?"
+```
+
+**Invariants:**
+- Assigned exactly once via atomic CAS (`claimFirstSuccessfulAttempt`) with `WHERE status = 'PENDING' AND succeeded_attempt_id IS NULL`.
+- Never overwritten, even in abnormal cases (D10/D11/D12).
+- No DB FK → avoids circular PaymentAttempt ↔ Payment JPA lifecycle complexity. Integrity enforced by service transaction + CAS + tests.
+- `refundedAt` removed from `Payment` in Phase 4. Will be re-evaluated in Phase 11 alongside `Refund` entity (may be redundant given `Refund.succeededAt`).
+
+**D10/D11/D12 CAS flow:**
+```
+claimFirstSuccessfulAttempt(paymentId, incomingAttemptId)
+  updatedRows == 1  →  this attempt is canonical winner ✅
+  updatedRows == 0  →  reload Payment:
+    payment.succeededAttemptId == incomingAttemptId  →  idempotent replay ✅
+    payment.succeededAttemptId != incomingAttemptId  →  DUPLICATE FINANCIAL SUCCESS
+                                                        persist incoming as SUCCEEDED
+                                                        do NOT replace canonical
+                                                        do NOT re-confirm Booking
+                                                        create Refund for incoming attempt
+                                                        CRITICAL log
+```
+
 ### ⑤ `totalAmount` formula — LOCKED
 
 ```
@@ -229,11 +268,14 @@ FAILED     = Processing failed, safe for retry
 - [x] Group A — Payment Initiation Failures
 - [x] Group B — Stripe Session Creation Failures
 - [x] Group C — Customer on Stripe Checkout
-- [x] Group D — Successful Payment & Booking Confirmation
+- [x] Group D — Successful Payment & Booking Confirmation (D10/D11/D12 added — duplicate financial success)
 - [x] Group E — Late Payment
 - [x] Group F — Checkout Session Expiry
 - [x] Group G — Security & Integrity Violations
 - [x] Group H — Reconciliation Candidates
 - [x] Decisions extracted
+- [x] `Payment.succeededAttemptId` added — canonical success pointer (Phase 4)
+- [x] `Payment.refundedAt` removed — deferred to Phase 11 Refund entity
+- [x] `UNKNOWN` vs `EXPIRED` semantics locked in enum Javadoc
 
-**Matrix Status: CLOSED ✅ — Phase 3 may begin.**
+**Matrix Status: CLOSED ✅ — Phase 4 Domain Model finalized.**

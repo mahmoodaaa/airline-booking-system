@@ -3,6 +3,7 @@ package com.project.bookingservice.service;
 import com.project.bookingservice.entity.Booking;
 import com.project.bookingservice.enums.BookingStatus;
 
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 public interface BookingTransactionService {
@@ -37,5 +38,5 @@ public interface BookingTransactionService {
      * UPDATE WHERE status = PENDING. Sets status to CONFIRMED,
      * updates paymentId and confirmedAt.
      */
-    boolean confirmPayment(UUID bookingId, String paymentId, java.time.LocalDateTime confirmedAt);
+    boolean confirmPayment(UUID bookingId, UUID paymentId, LocalDateTime confirmedAt);
 }

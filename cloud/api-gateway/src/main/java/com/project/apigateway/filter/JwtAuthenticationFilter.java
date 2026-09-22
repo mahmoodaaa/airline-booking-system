@@ -135,17 +135,17 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
             }
         }
 
-        // GET on /api/flights — only specific sub-paths are public
+        // GET on /api/flights — explicitly allow specific sub-paths instead of broad matching
         if ("GET".equalsIgnoreCase(method) && path.startsWith(FLIGHTS_ADMIN_PATH)) {
-            String remainder = path.substring(FLIGHTS_ADMIN_PATH.length());
-
-            // GET /api/flights  (exact, with or without trailing slash) — Admin-only list, NOT public
-            if (remainder.isEmpty() || remainder.equals("/")) {
-                return false;
+            // Matches /api/flights/{uuid}
+            if (path.matches("^/api/flights/[0-9a-fA-F\\-]+$")) {
+                return true;
             }
-
-            // GET /api/flights/{id}, /api/flights/{id}/availability — public
-            return true;
+            // Matches /api/flights/{uuid}/availability
+            if (path.matches("^/api/flights/[0-9a-fA-F\\-]+/availability$")) {
+                return true;
+            }
+            return false;
         }
 
         return false;

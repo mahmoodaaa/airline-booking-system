@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.UUID;
 
 /**
@@ -58,14 +59,8 @@ public class BookingTransactionServiceImpl implements BookingTransactionService 
 
     @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public boolean confirmPayment(UUID bookingId, String paymentId, java.time.LocalDateTime confirmedAt) {
-        int updatedRows = bookingRepository.confirmPayment(
-                bookingId,
-                paymentId,
-                confirmedAt,
-                java.time.LocalDateTime.now()
-        );
-
-        return updatedRows == 1;
+    public boolean confirmPayment(UUID bookingId, UUID paymentId, LocalDateTime confirmedAt) {
+        int updatedRows = bookingRepository.confirmPayment(bookingId, paymentId, confirmedAt, confirmedAt);
+        return updatedRows > 0;
     }
 }

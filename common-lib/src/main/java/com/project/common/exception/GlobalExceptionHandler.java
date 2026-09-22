@@ -88,6 +88,15 @@ public class GlobalExceptionHandler {
     }
 
 
+    @ExceptionHandler({
+            org.springframework.security.access.AccessDeniedException.class,
+            org.springframework.security.authorization.AuthorizationDeniedException.class
+    })
+    public ResponseEntity<ApiResponse<ErrorDetails>> handleAccessDenied(
+            Exception ex, WebRequest request) {
+        return buildErrorResponse(HttpStatus.FORBIDDEN, "Access Denied", ex, request);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiResponse<ErrorDetails>> handleGlobalException(
             Exception ex, WebRequest request) {
@@ -99,13 +108,13 @@ public class GlobalExceptionHandler {
     private ResponseEntity<ApiResponse<ErrorDetails>> buildErrorResponse(
             HttpStatus status, String message, Exception ex, WebRequest request) {
         ErrorDetails error = ErrorDetails.builder()
-                .message(ex.getMessage() != null ? ex.getMessage() : message)
+                .message(message)
                 .path(request.getDescription(false).replace("uri=", ""))
                 .exceptionType(ex.getClass().getSimpleName())
                 .status(status)
                 .build();
 
-        log.warn("{}: {}", status, error.getMessage());
+        log.warn("{}: {}", status, ex.getMessage() != null ? ex.getMessage() : message);
         return ResponseEntity.status(status).body(ApiResponse.failure(status, message, error));
     }
 }

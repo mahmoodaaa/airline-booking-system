@@ -561,48 +561,122 @@ class BookingServiceImplTest {
         @DisplayName("confirmPayment → happy path")
         void confirmPayment_happyPath() {
             Booking booking = aClaimWith(BookingStatus.PENDING);
+            UUID paymentId = UUID.randomUUID();
             when(bookingRepository.findById(BOOKING_ID)).thenReturn(Optional.of(booking));
-            when(bookingTransactionService.confirmPayment(eq(BOOKING_ID), eq("pay_123"), any()))
+            when(bookingTransactionService.confirmPayment(eq(BOOKING_ID), eq(paymentId), any()))
                     .thenReturn(true);
 
-            bookingService.confirmPayment(BOOKING_ID, "pay_123");
+            bookingService.confirmPayment(BOOKING_ID, paymentId);
 
-            verify(bookingTransactionService).confirmPayment(eq(BOOKING_ID), eq("pay_123"), any());
+            verify(bookingTransactionService).confirmPayment(eq(BOOKING_ID), eq(paymentId), any());
         }
 
         @Test
-        @DisplayName("confirmPayment → idempotent (already confirmed)")
-        void confirmPayment_alreadyConfirmed() {
+        @DisplayName("confirmPayment → CONFIRMED + same paymentId → success / idempotent")
+        void confirmPayment_alreadyConfirmedSamePayment() {
+            UUID paymentId = UUID.randomUUID();
             Booking booking = aClaimWith(BookingStatus.CONFIRMED);
+            booking.setPaymentId(paymentId);
+            
             when(bookingRepository.findById(BOOKING_ID)).thenReturn(Optional.of(booking));
 
-            bookingService.confirmPayment(BOOKING_ID, "pay_123");
+            bookingService.confirmPayment(BOOKING_ID, paymentId);
 
             verify(bookingTransactionService, never()).confirmPayment(any(), any(), any());
+        }
+
+        @Test
+        @DisplayName("confirmPayment → CONFIRMED + different paymentId → 409")
+        void confirmPayment_alreadyConfirmedDifferentPayment() {
+            UUID paymentId1 = UUID.randomUUID();
+            UUID paymentId2 = UUID.randomUUID();
+            Booking booking = aClaimWith(BookingStatus.CONFIRMED);
+            booking.setPaymentId(paymentId1);
+            
+            when(bookingRepository.findById(BOOKING_ID)).thenReturn(Optional.of(booking));
+
+            assertThatThrownBy(() -> bookingService.confirmPayment(BOOKING_ID, paymentId2))
+                    .isInstanceOf(com.project.common.exception.ConflictException.class)
+                    .hasMessageContaining("different payment");
         }
 
         @Test
         @DisplayName("confirmPayment → fail if not PENDING or CONFIRMED")
         void confirmPayment_invalidState() {
             Booking booking = aClaimWith(BookingStatus.CANCELLED);
+            UUID paymentId = UUID.randomUUID();
             when(bookingRepository.findById(BOOKING_ID)).thenReturn(Optional.of(booking));
 
-            assertThatThrownBy(() -> bookingService.confirmPayment(BOOKING_ID, "pay_123"))
+            assertThatThrownBy(() -> bookingService.confirmPayment(BOOKING_ID, paymentId))
                     .isInstanceOf(com.project.common.exception.ConflictException.class)
                     .hasMessageContaining("Booking cannot be confirmed");
         }
 
         @Test
-        @DisplayName("confirmPayment → fail on concurrent update")
-        void confirmPayment_concurrentUpdate() {
+        @DisplayName("confirmPayment → Initially PENDING CAS returns false reload = CONFIRMED same paymentId → success")
+        void confirmPayment_concurrentUpdateSamePaymentId() {
             Booking booking = aClaimWith(BookingStatus.PENDING);
-            when(bookingRepository.findById(BOOKING_ID)).thenReturn(Optional.of(booking));
-            when(bookingTransactionService.confirmPayment(eq(BOOKING_ID), eq("pay_123"), any()))
-                    .thenReturn(false);
+            UUID paymentId = UUID.randomUUID();
+            when(bookingRepository.findById(BOOKING_ID))
+                .thenReturn(Optional.of(booking)) // initial load
+                .thenReturn(Optional.of(booking)); // reload after cas failure
+                
+            when(bookingTransactionService.confirmPayment(eq(BOOKING_ID), eq(paymentId), any()))
+                    .thenAnswer(invocation -> {
+                        // simulate concurrent update before returning false
+                        booking.setStatus(BookingStatus.CONFIRMED);
+                        booking.setPaymentId(paymentId);
+                        return false; 
+                    });
 
-            assertThatThrownBy(() -> bookingService.confirmPayment(BOOKING_ID, "pay_123"))
+            bookingService.confirmPayment(BOOKING_ID, paymentId);
+            
+            verify(bookingTransactionService).confirmPayment(eq(BOOKING_ID), eq(paymentId), any());
+            verify(bookingRepository, times(2)).findById(BOOKING_ID);
+        }
+        
+        @Test
+        @DisplayName("confirmPayment → Initially PENDING CAS returns false reload = CONFIRMED different paymentId → 409")
+        void confirmPayment_concurrentUpdateDifferentPaymentId() {
+            Booking booking = aClaimWith(BookingStatus.PENDING);
+            UUID paymentId = UUID.randomUUID();
+            UUID otherPaymentId = UUID.randomUUID();
+            when(bookingRepository.findById(BOOKING_ID))
+                .thenReturn(Optional.of(booking)) // initial load
+                .thenReturn(Optional.of(booking)); // reload after cas failure
+                
+            when(bookingTransactionService.confirmPayment(eq(BOOKING_ID), eq(paymentId), any()))
+                    .thenAnswer(invocation -> {
+                        // simulate concurrent update with different payment
+                        booking.setStatus(BookingStatus.CONFIRMED);
+                        booking.setPaymentId(otherPaymentId);
+                        return false; 
+                    });
+
+            assertThatThrownBy(() -> bookingService.confirmPayment(BOOKING_ID, paymentId))
                     .isInstanceOf(com.project.common.exception.ConflictException.class)
-                    .hasMessageContaining("concurrent update");
+                    .hasMessageContaining("different payment");
+        }
+        
+        @Test
+        @DisplayName("confirmPayment → Initially PENDING CAS loses to EXPIRING/CANCELLING → 409")
+        void confirmPayment_concurrentUpdateLosesToCancel() {
+            Booking booking = aClaimWith(BookingStatus.PENDING);
+            UUID paymentId = UUID.randomUUID();
+            when(bookingRepository.findById(BOOKING_ID))
+                .thenReturn(Optional.of(booking)) // initial load
+                .thenReturn(Optional.of(booking)); // reload after cas failure
+                
+            when(bookingTransactionService.confirmPayment(eq(BOOKING_ID), eq(paymentId), any()))
+                    .thenAnswer(invocation -> {
+                        // simulate concurrent cancel
+                        booking.setStatus(BookingStatus.CANCELLING);
+                        return false; 
+                    });
+
+            assertThatThrownBy(() -> bookingService.confirmPayment(BOOKING_ID, paymentId))
+                    .isInstanceOf(com.project.common.exception.ConflictException.class)
+                    .hasMessageContaining("Current status: CANCELLING");
         }
     }
 }
