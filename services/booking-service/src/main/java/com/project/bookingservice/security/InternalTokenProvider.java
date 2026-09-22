@@ -35,6 +35,7 @@ public class InternalTokenProvider {
 
         return Jwts.builder()
                 .subject("booking-service")
+                .claim("role", "SERVICE")
                 .claim("type", "SERVICE")
                 .issuedAt(new Date(now))
                 .expiration(new Date(now + SERVICE_TOKEN_TTL_MS))

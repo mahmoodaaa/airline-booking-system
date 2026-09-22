@@ -111,7 +111,7 @@ public class Booking {
     // -----------------------------------
 
     @Column(name = "payment_id")
-    private String paymentId;
+    private UUID paymentId;
 
     @Column(name = "confirmed_at")
     private LocalDateTime confirmedAt;

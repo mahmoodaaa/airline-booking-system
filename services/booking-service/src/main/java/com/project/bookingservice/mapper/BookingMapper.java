@@ -3,6 +3,7 @@ package com.project.bookingservice.mapper;
 import com.project.bookingservice.dto.request.PassengerRequest;
 import com.project.bookingservice.dto.response.BookingResponse;
 import com.project.bookingservice.dto.response.PassengerResponse;
+import com.project.bookingservice.dto.response.PaymentContextResponse;
 import com.project.bookingservice.entity.Booking;
 import com.project.bookingservice.entity.BookingPassenger;
 import org.springframework.stereotype.Component;
@@ -92,4 +93,20 @@ public class BookingMapper {
                         request.getNationality() != null ? request.getNationality().toUpperCase() : null)
                 .build();
     }
+
+    public PaymentContextResponse toPaymentContextResponse(Booking booking) {
+        if (booking == null) {
+            return null;
+        }
+
+        return PaymentContextResponse.builder()
+                .bookingId(booking.getId())
+                .userId(booking.getUserId())
+                .totalAmount(booking.getTotalAmount())
+                .currency(booking.getCurrency())
+                .status(booking.getStatus())
+                .expiresAt(booking.getExpiresAt())
+                .build();
+    }
+
 }

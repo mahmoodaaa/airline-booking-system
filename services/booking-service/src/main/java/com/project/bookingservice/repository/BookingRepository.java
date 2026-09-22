@@ -64,10 +64,11 @@ public interface BookingRepository extends JpaRepository<Booking, UUID> {
                b.updatedAt = :updatedAt
          WHERE b.id = :bookingId
            AND b.status = 'PENDING'
+           AND b.paymentId IS NULL
     """)
     int confirmPayment(
             @Param("bookingId") UUID bookingId,
-            @Param("paymentId") String paymentId,
+            @Param("paymentId") UUID paymentId,
             @Param("confirmedAt") LocalDateTime confirmedAt,
             @Param("updatedAt") LocalDateTime updatedAt
     );

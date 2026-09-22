@@ -84,7 +84,12 @@ public class SecurityConfig {
 
                         .requestMatchers(
                                 "/internal/bookings/**"
-                        ).hasAuthority("SERVICE")
+                        ).access((authentication, context) -> {
+                            var currentAuth = authentication.get();
+                            boolean isService = currentAuth.getAuthorities().stream().anyMatch(a -> "SERVICE".equals(a.getAuthority()));
+                            boolean isPaymentService = "payment-service".equals(currentAuth.getName());
+                            return new org.springframework.security.authorization.AuthorizationDecision(isService && isPaymentService);
+                        })
 
                         .anyRequest().denyAll()
                 )

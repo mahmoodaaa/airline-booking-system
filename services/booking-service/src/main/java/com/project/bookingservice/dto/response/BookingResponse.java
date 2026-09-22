@@ -33,7 +33,7 @@ public class BookingResponse {
     private BigDecimal totalAmount;
     private Currency currency;
 
-    private String paymentId;
+    private UUID paymentId;
     private LocalDateTime confirmedAt;
 
     private BookingStatus status;

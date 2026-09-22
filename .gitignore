@@ -13,6 +13,15 @@ target/
 .env
 .env.*
 !.env.example
+application-local.properties
+**/application-local.properties
+!application-local.example.properties
+!**/application-local.example.properties
+application-local.yml
+**/application-local.yml
+!application-local.example.yml
+!**/application-local.example.yml
+
 
 # Logs
 *.log

@@ -6,12 +6,14 @@ import com.project.bookingservice.service.BookingService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.security.access.prepost.PreAuthorize;
 
 import java.util.UUID;
 
 @RestController
 @RequestMapping("/internal/bookings")
 @RequiredArgsConstructor
+@PreAuthorize("hasAuthority('SERVICE') and authentication.name == 'payment-service'")
 public class InternalBookingPaymentController {
 
     private final BookingService bookingService;
@@ -27,7 +29,7 @@ public class InternalBookingPaymentController {
     @PostMapping("/{bookingId}/payments/{paymentId}/confirm")
     public ResponseEntity<ApiResponse<Void>> confirmPayment(
             @PathVariable UUID bookingId,
-            @PathVariable String paymentId) {
+            @PathVariable UUID paymentId) {
         
         bookingService.confirmPayment(bookingId, paymentId);
         return ResponseEntity.ok(ApiResponse.success(null));
