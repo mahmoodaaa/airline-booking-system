@@ -16,11 +16,11 @@ import com.stripe.exception.AuthenticationException;
 import com.stripe.exception.CardException;
 import com.stripe.exception.IdempotencyException;
 import com.stripe.exception.InvalidRequestException;
+import com.stripe.model.Refund;
 import com.stripe.model.checkout.Session;
 import com.stripe.exception.StripeException;
-
-
 import com.stripe.net.RequestOptions;
+import com.stripe.param.RefundCreateParams;
 import com.stripe.param.checkout.SessionCreateParams;
 
 
@@ -34,7 +34,7 @@ import org.springframework.stereotype.Component;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
-import java.time.temporal.ChronoUnit;
+
 
 @Slf4j
 @Component
@@ -43,8 +43,13 @@ public class StripePaymentGateway implements PaymentGateway {
 
     private static final long MIN_CHECKOUT_EXPIRY_MINUTES = 30;
     private static final long MAX_CHECKOUT_EXPIRY_MINUTES = 24 * 60;
+    // Guard: Stripe checkout must finish this many seconds before the Booking deadline.
+    private static final long BOOKING_DEADLINE_BUFFER_SECONDS = 60;
 
     private final StripeCheckoutClient stripeCheckoutClient;
+
+    private final StripeRefundClient stripeRefundClient;
+
     private final StripeProperties stripeProperties;
     private final StripeAmountConverter amountConverter;
 
@@ -165,6 +170,120 @@ public class StripePaymentGateway implements PaymentGateway {
 
 
     // ============================================================
+    // Full Refund (booking-rejection compensation)
+    // ============================================================
+
+    @Override
+    public String refundFullPayment(String providerPaymentId, String idempotencyKey) {
+
+        // --------------------------------------------------------
+        // 1. Validate inputs before any network call.
+        // --------------------------------------------------------
+
+        if (providerPaymentId == null || providerPaymentId.isBlank()) {
+            throw new GatewayDefinitiveException("providerPaymentId is required for refund");
+        }
+
+        if (idempotencyKey == null || idempotencyKey.isBlank()) {
+            throw new GatewayDefinitiveException("idempotencyKey is required for refund");
+        }
+
+
+        // --------------------------------------------------------
+        // 2. Build Stripe Refund params.
+        //
+        // Full refund: omit amount so Stripe uses the full captured amount.
+        // --------------------------------------------------------
+
+        RefundCreateParams params = RefundCreateParams.builder()
+                .setPaymentIntent(providerPaymentId)
+                .build();
+
+        RequestOptions requestOptions = RequestOptions.builder()
+                .setIdempotencyKey(idempotencyKey)
+                .build();
+
+
+        // --------------------------------------------------------
+        // 3. Stripe network call — no DB transaction open here.
+        // --------------------------------------------------------
+
+        final Refund refund;
+
+        try {
+
+            refund = stripeRefundClient.createRefund(params, requestOptions);
+
+        } catch (CardException |
+                 InvalidRequestException |
+                 AuthenticationException |
+                 IdempotencyException ex) {
+
+            log.warn(
+                    "Stripe definitively rejected refund. " +
+                    "providerPaymentId={} stripeException={}",
+                    providerPaymentId,
+                    ex.getClass().getSimpleName(),
+                    ex
+            );
+
+            throw new GatewayDefinitiveException("Stripe definitively rejected refund", ex);
+
+        } catch (ApiConnectionException | ApiException ex) {
+
+            log.error(
+                    "CRITICAL: Stripe refund outcome is uncertain. " +
+                    "providerPaymentId={} stripeException={}",
+                    providerPaymentId,
+                    ex.getClass().getSimpleName(),
+                    ex
+            );
+
+            throw new GatewayAmbiguousException("Stripe refund outcome is uncertain", ex);
+
+        } catch (StripeException ex) {
+
+            log.error(
+                    "CRITICAL: Stripe refund outcome is uncertain. " +
+                    "providerPaymentId={} stripeException={}",
+                    providerPaymentId,
+                    ex.getClass().getSimpleName(),
+                    ex
+            );
+
+            throw new GatewayAmbiguousException("Stripe refund outcome is uncertain", ex);
+        }
+
+
+        // --------------------------------------------------------
+        // 4. Map Stripe response.
+        //
+        // If Stripe returned success but the response is unusable,
+        // treat as ambiguous: the refund may have been processed.
+        // --------------------------------------------------------
+
+        if (refund == null || refund.getId() == null || refund.getId().isBlank()) {
+
+            log.error(
+                    "CRITICAL: Stripe refund returned unusable response. " +
+                    "providerPaymentId={}",
+                    providerPaymentId
+            );
+
+            throw new GatewayAmbiguousException("Stripe refund returned an unusable response");
+        }
+
+        log.info(
+                "Stripe refund created. providerPaymentId={} providerRefundId={}",
+                providerPaymentId,
+                refund.getId()
+        );
+
+        return refund.getId();
+    }
+
+
+    // ============================================================
     // Stripe Session parameters
     // ============================================================
 
@@ -233,10 +352,37 @@ public class StripePaymentGateway implements PaymentGateway {
                         .build();
 
 
-        long expiresAtEpochSeconds = Instant.now()
-                        .plus(stripeProperties.getCheckoutExpiryMinutes(), ChronoUnit.MINUTES)
-                        .getEpochSecond();
+        // --------------------------------------------------------
+        // Checkout session lifetime
+        //
+        // We use an INDEPENDENT configured window (checkoutExpiryMinutes)
+        // rather than deriving from bookingExpiresAt.
+        //
+        // This avoids the "holdUntil - 5 min" race where processing delay
+        // can push the computed expiry below Stripe's 30-minute minimum.
+        //
+        // bookingExpiresAt serves ONLY as an upper-bound safety guard:
+        // if now + checkoutExpiryMinutes >= bookingExpiresAt, we reject
+        // before hitting Stripe at all.
+        // --------------------------------------------------------
 
+        long nowEpoch = Instant.now().getEpochSecond();
+        long configuredExpiryEpoch = nowEpoch + (stripeProperties.getCheckoutExpiryMinutes() * 60);
+
+        if (request.bookingExpiresAt() != null) {
+            long bookingDeadlineEpoch = request.bookingExpiresAt().toEpochSecond(ZoneOffset.UTC);
+
+            if (configuredExpiryEpoch >= bookingDeadlineEpoch - BOOKING_DEADLINE_BUFFER_SECONDS) {
+                throw new GatewayDefinitiveException(
+                        "Stripe checkout window would overlap or exceed the Booking payment deadline. " +
+                        "Remaining booking window is too short to start a new Checkout."
+                );
+            }
+        }
+
+        long minAllowedEpoch = nowEpoch + (MIN_CHECKOUT_EXPIRY_MINUTES * 60);
+        long maxAllowedEpoch = nowEpoch + (MAX_CHECKOUT_EXPIRY_MINUTES * 60);
+        long expiresAtEpochSeconds = Math.min(Math.max(configuredExpiryEpoch, minAllowedEpoch), maxAllowedEpoch);
 
         return SessionCreateParams.builder()
                 // one-time payment
@@ -474,4 +620,7 @@ public class StripePaymentGateway implements PaymentGateway {
 
         return LocalDateTime.ofInstant(Instant.ofEpochSecond(epochSeconds), ZoneOffset.UTC);
     }
+
+
+
 }

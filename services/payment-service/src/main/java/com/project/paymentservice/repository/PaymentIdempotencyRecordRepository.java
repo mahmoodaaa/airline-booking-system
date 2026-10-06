@@ -47,8 +47,8 @@ public interface PaymentIdempotencyRecordRepository
             :keyHash,
             :requestHash,
             :bookingId,
-            CURRENT_TIMESTAMP,
-            CURRENT_TIMESTAMP
+            :createdAt,
+            :updatedAt
         )
         ON CONFLICT (user_id, idempotency_key_hash)
         DO NOTHING
@@ -58,6 +58,8 @@ public interface PaymentIdempotencyRecordRepository
             @Param("userId") UUID userId,
             @Param("keyHash") String keyHash,
             @Param("requestHash") String requestHash,
-            @Param("bookingId") UUID bookingId
+            @Param("bookingId") UUID bookingId,
+            @Param("createdAt") java.time.LocalDateTime createdAt,
+            @Param("updatedAt") java.time.LocalDateTime updatedAt
     );
 }

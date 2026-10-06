@@ -5,11 +5,13 @@ import com.project.paymentservice.entity.PaymentAttempt;
 import com.project.paymentservice.entity.PaymentIdempotencyRecord;
 import com.project.paymentservice.enums.PaymentMethodType;
 import com.project.paymentservice.enums.PaymentProvider;
+import com.project.paymentservice.enums.RefundStatus;
 import com.project.paymentservice.service.model.AttemptClaimResult;
 import com.project.paymentservice.service.model.PaymentSuccessResult;
 import com.project.paymentservice.enums.BookingConfirmationStatus;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -22,9 +24,9 @@ import java.util.UUID;
  * The service exists to enforce:
  *
  *      DB CLAIM
- *          ↓
+ *          â†“
  *       COMMIT
- *          ↓
+ *          â†“
  *    NETWORK CALL
  *
  * This is the core COMMIT-BEFORE-NETWORK boundary.
@@ -101,7 +103,8 @@ public interface PaymentTransactionService {
             UUID paymentId,
             UUID idempotencyRecordId,
             PaymentProvider provider,
-            PaymentMethodType paymentMethod
+            PaymentMethodType paymentMethod,
+            LocalDateTime latestCheckoutStartAt
     );
 
 
@@ -194,17 +197,18 @@ public interface PaymentTransactionService {
 
 
     /**
-     * Applies checkout.session.expired.
+     * Applies provider-confirmed Checkout expiration.
      *
-     * Expected transition:
+     * INITIALIZING / OPEN / UNKNOWN -> EXPIRED.
      *
-     * OPEN -> EXPIRED
+     * Payment remains PENDING because no financial success occurred.
      *
-     * Payment remains PENDING because another Attempt may
-     * be created later.
+     * EXPIRED is terminal for this Attempt.
+     * A later payment initiation may create a new Attempt only when:
+     * - there is no other active/unresolved Attempt
+     * - the Booking payment window still has enough remaining time
      *
-     * This method does NOT expire the Booking and does NOT
-     * release inventory.
+     * This method does not expire the Booking or release inventory.
      */
     PaymentAttempt markAttemptExpiredFromWebhook(UUID attemptId, String providerCheckoutId, LocalDateTime expiredAt);
 
@@ -240,10 +244,12 @@ public interface PaymentTransactionService {
      *
      * PENDING -> REJECTED
      *
-     * Payment remains SUCCEEDED.
-     * Phase 11 will start the technical refund.
+     * Payment remains financially SUCCEEDED.
+     * BookingConfirmationStatus becomes REJECTED.
      *
-     * No network calls are allowed inside this method.
+     * This represents an exceptional state where money was received
+     * but the Booking could not be confirmed.
+     * Operational/manual financial handling may be required.
      */
     Payment markBookingRejected(
             UUID paymentId,
@@ -275,8 +281,57 @@ public interface PaymentTransactionService {
     );
 
 
+    // =========================================================
+    // Refund â€” booking-rejection compensation
+    // =========================================================
+
+    /**
+     * Atomically claims a pending refund for a definitively rejected Booking.
+     *
+     * Eligible preconditions:
+     *   Payment.status                == SUCCEEDED
+     *   BookingConfirmationStatus     == REJECTED
+     *   Payment.succeededAttemptId    != null
+     *   Payment.refundStatus          == NOT_STARTED | UNKNOWN
+     *
+     * Transitions:
+     *   NOT_STARTED / UNKNOWN  ->  PENDING
+     *
+     * Returns empty Optional when:
+     *   - refundStatus == SUCCEEDED  (already done, no-op)
+     *   - refundStatus == FAILED     (manual intervention needed)
+     *   - refundStatus == PENDING    (concurrent refund in progress)
+     *   - preconditions not met
+     */
+    Optional<Payment> claimRejectedBookingRefund(UUID paymentId);
 
 
+    /**
+     * Finalizes a successful Stripe refund.
+     *
+     * Transition: PENDING -> SUCCEEDED
+     */
+    Payment markRefundSucceeded(UUID paymentId, String providerRefundId);
+
+
+    /**
+     * Records an ambiguous refund outcome (timeout / connection lost).
+     *
+     * Transition: PENDING -> UNKNOWN
+     *
+     * The same idempotency key will be reused on the next retry.
+     */
+    Payment markRefundUnknown(UUID paymentId, String error);
+
+
+    /**
+     * Records a definitive refund failure from the provider.
+     *
+     * Transition: PENDING -> FAILED
+     *
+     * FAILED requires manual operational intervention.
+     */
+    Payment markRefundFailed(UUID paymentId, String error);
 
 
 }

@@ -38,6 +38,9 @@ public class BookingServiceImpl implements BookingService {
         @Value("${booking.ttl-minutes:10}")
         private long bookingTtlMinutes;
 
+       @Value("${booking.payment-window-minutes:45}")
+        private long paymentWindowMinutes;
+
         private final BookingRepository bookingRepository;
         private final BookingTransactionService bookingTransactionService;
         private final RequestHashService requestHashService;
@@ -180,7 +183,8 @@ public class BookingServiceImpl implements BookingService {
 
                 claim.setStatus(BookingStatus.PENDING);
 
-                claim.setExpiresAt(LocalDateTime.now().plusMinutes(bookingTtlMinutes));
+            claim.setExpiresAt(LocalDateTime.now(java.time.ZoneOffset.UTC)
+                    .plusMinutes(bookingTtlMinutes));
 
                 // ============================================================
                 // 6. Finalize Booking
@@ -326,59 +330,151 @@ public class BookingServiceImpl implements BookingService {
         // INTERNAL (Payment Service)
         // ============================================================
 
-        @Override
-        public PaymentContextResponse getPaymentContext(UUID bookingId) {
-                Booking booking = bookingRepository.findById(bookingId)
-                                .orElseThrow(() -> new RecordNotFoundException("Booking not found: " + bookingId));
+    @Override
+    public PaymentContextResponse startPayment(UUID bookingId, UUID userId) {
 
-                return bookingMapper.toPaymentContextResponse(booking);
+        Objects.requireNonNull(bookingId, "bookingId must not be null");
+
+        Objects.requireNonNull(userId, "userId must not be null");
+
+        LocalDateTime now = LocalDateTime.now(java.time.ZoneOffset.UTC);
+
+        Booking existing = bookingRepository.findByIdAndUserId(bookingId, userId)
+                .orElseThrow(() -> new RecordNotFoundException("Booking not found or access denied: " + bookingId));
+
+        // ============================================================
+        // Idempotent replay
+        // ============================================================
+
+        if (existing.getStatus() == BookingStatus.PAYMENT_PENDING) {
+
+            if (existing.getExpiresAt() != null && existing.getExpiresAt().isAfter(now)) {
+                log.info("startPayment replay — existing PAYMENT_PENDING window reused. " + "bookingId={} expiresAt={}",
+                        bookingId,
+                        existing.getExpiresAt());
+
+                return bookingMapper.toPaymentContextResponse(existing);
+            }
+
+            throw new ConflictException("Booking payment window has expired");
         }
+
+        // ============================================================
+        // New payment window
+        // ============================================================
+
+        LocalDateTime newExpiresAt = now.plusMinutes(paymentWindowMinutes);
+
+        boolean transitioned = bookingTransactionService.startPaymentWindow(bookingId, userId, newExpiresAt, now);
+
+        if (!transitioned) {
+
+            /*
+             * Important concurrency case:
+             *
+             * Another request may have won
+             * PENDING -> PAYMENT_PENDING
+             * between our SELECT and CAS.
+             */
+
+            Booking current = bookingRepository.findByIdAndUserId(bookingId, userId)
+                    .orElseThrow(() -> new RecordNotFoundException("Booking not found or access denied: " + bookingId));
+
+            LocalDateTime replayNow = LocalDateTime.now(java.time.ZoneOffset.UTC);
+
+            if (current.getStatus() == BookingStatus.PAYMENT_PENDING
+                    && current.getExpiresAt() != null && current.getExpiresAt().isAfter(replayNow)) {
+
+                log.info(
+                        "startPayment concurrent replay — existing payment window reused. " +
+                                "bookingId={} expiresAt={}",
+                        bookingId,
+                        current.getExpiresAt()
+                );
+
+                return bookingMapper.toPaymentContextResponse(current);
+            }
+
+            log.warn(
+                    "startPayment rejected. bookingId={} status={} expiresAt={}",
+                    bookingId,
+                    current.getStatus(),
+                    current.getExpiresAt()
+            );
+
+            throw new ConflictException("Booking is not eligible for payment. status=" + current.getStatus());
+        }
+
+        Booking updated = bookingRepository.findByIdAndUserId(bookingId, userId)
+                .orElseThrow(() -> new RecordNotFoundException(
+                        "Booking not found after payment-window transition: " + bookingId
+                ));
+
+        log.info("startPayment — PENDING -> PAYMENT_PENDING. " +
+                "bookingId={} expiresAt={}", bookingId, updated.getExpiresAt());
+
+        return bookingMapper.toPaymentContextResponse(updated);
+    }
 
         @Override
         public void confirmPayment(UUID bookingId, UUID paymentId) {
-                Booking booking = bookingRepository.findById(bookingId)
-                                .orElseThrow(() -> new RecordNotFoundException("Booking not found: " + bookingId));
 
-                if (booking.getStatus() == BookingStatus.CONFIRMED) {
+            Booking booking = bookingRepository.findById(bookingId)
+                    .orElseThrow(() -> new RecordNotFoundException("Booking not found: " + bookingId));
 
-                        if (Objects.equals(booking.getPaymentId(), paymentId)) {
-                                log.info(
-                                                "Booking {} already confirmed with same payment {}",
-                                                bookingId,
-                                                paymentId);
-                                return;
-                        }
+            // Idempotent replay — already confirmed with same payment
+            if (booking.getStatus() == BookingStatus.CONFIRMED) {
 
-                        throw new ConflictException(
-                                        "Booking is already confirmed with a different payment");
+                if (Objects.equals(booking.getPaymentId(), paymentId)) {
+                    log.info("Booking {} already confirmed with same payment {}", bookingId, paymentId);
+                    return;
                 }
 
-                if (booking.getStatus() != BookingStatus.PENDING) {
-                        throw new ConflictException(
-                                        "Booking cannot be confirmed. Current status: " + booking.getStatus());
+                throw new ConflictException("Booking is already confirmed with a different payment");
+            }
+
+            // Only PAYMENT_PENDING can be confirmed (not PENDING)
+            if (booking.getStatus() != BookingStatus.PAYMENT_PENDING) {
+                throw new ConflictException("Booking cannot be confirmed. Current status: " + booking.getStatus());
+            }
+
+            LocalDateTime now = LocalDateTime.now(java.time.ZoneOffset.UTC);
+            boolean success = bookingTransactionService.confirmPayment(bookingId, paymentId, now);
+
+            if (!success) {
+                Booking current = bookingRepository.findById(bookingId)
+                        .orElseThrow(() -> new RecordNotFoundException("Booking not found: " + bookingId));
+
+                LocalDateTime currentNow = LocalDateTime.now(java.time.ZoneOffset.UTC);
+
+                if (current.getStatus() == BookingStatus.PAYMENT_PENDING
+                        && (current.getExpiresAt() == null
+                        || !current.getExpiresAt().isAfter(currentNow))) {
+
+                    throw new ConflictException(
+                            "Booking payment window expired before confirmation could complete"
+                    );
+                }
+                if (current.getStatus() == BookingStatus.CONFIRMED
+                        && Objects.equals(current.getPaymentId(), paymentId)) {
+                    log.info("Booking {} concurrently confirmed with same payment {}", bookingId, paymentId);
+                    return;
                 }
 
-                LocalDateTime now = LocalDateTime.now();
-                boolean success = bookingTransactionService.confirmPayment(bookingId, paymentId, now);
+                if (current.getStatus() == BookingStatus.CONFIRMED) {
+                    throw new ConflictException("Booking was confirmed with a different payment");}
 
-                if (!success) {
-                        Booking current = bookingRepository.findById(bookingId)
-                                .orElseThrow(() -> new RecordNotFoundException("Booking not found: " + bookingId));
-
-                        if (current.getStatus() == BookingStatus.CONFIRMED
-                                && Objects.equals(current.getPaymentId(), paymentId)) {
-                                log.info("Booking {} was concurrently confirmed with same payment {}", bookingId, paymentId);
-                                return;
-                        }
-
-                        if (current.getStatus() == BookingStatus.CONFIRMED) {
-                                throw new ConflictException("Booking was confirmed with a different payment");
-                        }
-
-                        throw new ConflictException("Booking cannot be confirmed. Current status: " + current.getStatus());
+                // Hold expired — scheduler won the race
+                if (current.getStatus() == BookingStatus.EXPIRED) {
+                    throw new ConflictException(
+                            "Booking payment hold expired before confirmation could complete");
                 }
 
-                log.info("Booking {} confirmed successfully with paymentId {}", bookingId, paymentId);
+                throw new ConflictException(
+                        "Booking cannot be confirmed. Current status: " + current.getStatus());
+            }
+
+            log.info("Booking {} confirmed successfully with paymentId {}", bookingId, paymentId);
         }
 
         // ============================================================
@@ -443,11 +539,13 @@ public class BookingServiceImpl implements BookingService {
                                         "Previous booking attempt requires manual reconciliation");
                 }
 
-                /*
-                 * PENDING / CANCELLED / EXPIRED
-                 *
-                 * Same idempotency request => same Booking.
-                 */
+            /*
+             * Any completed/stable state:
+             * PENDING / PAYMENT_PENDING / CONFIRMED /
+             * CANCELLED / EXPIRED / ...
+             *
+             * Same idempotency request => same Booking.
+             */
                 return new CreateBookingResult(bookingMapper.toResponse(booking), false);
         }
 

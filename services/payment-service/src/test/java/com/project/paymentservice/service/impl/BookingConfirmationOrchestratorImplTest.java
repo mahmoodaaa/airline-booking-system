@@ -25,6 +25,9 @@ class BookingConfirmationOrchestratorImplTest {
     @Mock
     private PaymentTransactionService paymentTransactionService;
 
+    @Mock
+    private BookingRejectedRefundService bookingRejectedRefundService;
+
     private BookingConfirmationOrchestratorImpl orchestrator;
 
     private final UUID bookingId = UUID.randomUUID();
@@ -33,7 +36,11 @@ class BookingConfirmationOrchestratorImplTest {
 
     @BeforeEach
     void setUp() {
-        orchestrator = new BookingConfirmationOrchestratorImpl(bookingClient, paymentTransactionService);
+        orchestrator = new BookingConfirmationOrchestratorImpl(
+                bookingClient,
+                paymentTransactionService,
+                bookingRejectedRefundService
+        );
     }
 
 
@@ -44,7 +51,6 @@ class BookingConfirmationOrchestratorImplTest {
     @Test
     void shouldMarkBookingConfirmedOnSuccess() {
 
-        // BookingClient returns normally (void, no exception)
         doNothing().when(bookingClient).confirmBooking(bookingId, paymentId);
 
         orchestrator.confirmBooking(bookingId, paymentId);
@@ -57,42 +63,40 @@ class BookingConfirmationOrchestratorImplTest {
 
 
     // ============================================================
-    // Definitive rejection — BookingConfirmationRejectedException
-    // -> REJECTED (no throw back to caller)
+    // DEFINITIVE REJECTION -> local REJECTED, no technical refund
     // ============================================================
 
     @Test
     void shouldMarkBookingRejectedOnDefinitiveRejection() {
 
-        BookingConfirmationRejectedException rejection =
-                new BookingConfirmationRejectedException("Booking has expired", HttpStatus.CONFLICT);
+        doThrow(new BookingConfirmationRejectedException(
+                "Booking has already expired",
+                HttpStatus.GONE
+        )).when(bookingClient).confirmBooking(bookingId, paymentId);
 
-        doThrow(rejection).when(bookingClient).confirmBooking(bookingId, paymentId);
-
-        // Orchestrator must NOT throw — it swallows rejection and persists
         orchestrator.confirmBooking(bookingId, paymentId);
 
         verify(paymentTransactionService).markBookingRejected(eq(paymentId), anyString());
+        verify(bookingRejectedRefundService).refund(paymentId);
         verify(paymentTransactionService, never()).markBookingConfirmed(any());
         verify(paymentTransactionService, never()).recordBookingConfirmationError(any(), any());
     }
 
 
     // ============================================================
-    // Ambiguous outcome — BookingIntegrationAmbiguousException
-    // -> stays PENDING (recordBookingConfirmationError)
+    // AMBIGUOUS response -> throws exception for webhook retry
     // ============================================================
 
     @Test
-    void shouldRecordAmbiguousErrorOnNetworkFailure() {
+    void shouldThrowAndPersistErrorOnAmbiguousIntegrationException() {
 
-        BookingIntegrationAmbiguousException ambiguous =
-                new BookingIntegrationAmbiguousException("Connection timed out");
+        doThrow(new BookingIntegrationAmbiguousException(
+                "503 Service Unavailable"
+        )).when(bookingClient).confirmBooking(bookingId, paymentId);
 
-        doThrow(ambiguous).when(bookingClient).confirmBooking(bookingId, paymentId);
-
-        // Must NOT throw
-        orchestrator.confirmBooking(bookingId, paymentId);
+        assertThrows(BookingIntegrationAmbiguousException.class, () -> {
+            orchestrator.confirmBooking(bookingId, paymentId);
+        });
 
         verify(paymentTransactionService).recordBookingConfirmationError(eq(paymentId), anyString());
         verify(paymentTransactionService, never()).markBookingConfirmed(any());
@@ -101,17 +105,18 @@ class BookingConfirmationOrchestratorImplTest {
 
 
     // ============================================================
-    // Unexpected RuntimeException -> treated as ambiguous (safe default)
+    // Unexpected RuntimeException -> treated as ambiguous, throws exception
     // ============================================================
 
     @Test
-    void shouldTreatUnexpectedExceptionAsAmbiguous() {
+    void shouldThrowAndTreatUnexpectedExceptionAsAmbiguous() {
 
         doThrow(new RuntimeException("unexpected NPE"))
                 .when(bookingClient).confirmBooking(bookingId, paymentId);
 
-        // Must NOT throw — safe default is PENDING not REJECTED
-        orchestrator.confirmBooking(bookingId, paymentId);
+        assertThrows(RuntimeException.class, () -> {
+            orchestrator.confirmBooking(bookingId, paymentId);
+        });
 
         verify(paymentTransactionService).recordBookingConfirmationError(eq(paymentId), anyString());
         verify(paymentTransactionService, never()).markBookingRejected(any(), any());
@@ -120,23 +125,22 @@ class BookingConfirmationOrchestratorImplTest {
 
 
     // ============================================================
-    // TX #2 failure after remote SUCCESS
-    // -> logs CRITICAL but does NOT throw (stays PENDING)
+    // TX #2 failure after remote SUCCESS -> throws exception for retry
     // ============================================================
 
     @Test
-    void shouldNotThrowWhenLocalFinalizationFailsAfterRemoteSuccess() {
+    void shouldThrowWhenLocalFinalizationFailsAfterRemoteSuccess() {
 
         doNothing().when(bookingClient).confirmBooking(bookingId, paymentId);
 
         doThrow(new RuntimeException("DB connection lost"))
                 .when(paymentTransactionService).markBookingConfirmed(paymentId);
 
-        // Must NOT rethrow — webhook must still return 200
-        orchestrator.confirmBooking(bookingId, paymentId);
+        assertThrows(RuntimeException.class, () -> {
+            orchestrator.confirmBooking(bookingId, paymentId);
+        });
 
         verify(paymentTransactionService).markBookingConfirmed(paymentId);
-        // recordBookingConfirmationError is the fallback for this critical case
         verify(paymentTransactionService).recordBookingConfirmationError(eq(paymentId), anyString());
     }
 

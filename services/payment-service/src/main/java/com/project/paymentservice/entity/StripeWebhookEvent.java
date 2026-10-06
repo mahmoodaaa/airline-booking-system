@@ -3,10 +3,9 @@ package com.project.paymentservice.entity;
 import com.project.paymentservice.enums.WebhookProcessingStatus;
 import jakarta.persistence.*;
 import lombok.*;
-import org.hibernate.annotations.CreationTimestamp;
-import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.UUID;
 
 @Entity
@@ -92,14 +91,26 @@ public class StripeWebhookEvent {
     // Audit
     // =========================================
 
-    @CreationTimestamp
     @Column(name = "received_at", nullable = false, updatable = false)
     private LocalDateTime receivedAt;
 
-    @UpdateTimestamp
     @Column(name = "updated_at", nullable = false)
     private LocalDateTime updatedAt;
 
     @Column(name = "processed_at")
     private LocalDateTime processedAt;
+
+    @PrePersist
+    protected void onCreate() {
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+        if (receivedAt == null) {
+            receivedAt = now;
+        }
+        updatedAt = now;
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now(ZoneOffset.UTC);
+    }
 }

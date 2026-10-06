@@ -52,10 +52,17 @@ public class BookingClientErrorDecoder implements ErrorDecoder {
                 || status == HttpStatus.GONE
                 || status == HttpStatus.UNPROCESSABLE_ENTITY) {
 
-            log.warn("Booking integration definitively rejected request. " + "status={} method={}", status.value(), methodKey);
+            String responseBody = "";
+            try {
+                if (response.body() != null) {
+                    responseBody = feign.Util.toString(response.body().asReader(feign.Util.UTF_8));
+                }
+            } catch (Exception ignored) {}
+
+            log.warn("Booking integration definitively rejected request. status={} method={} body={}", status.value(), methodKey, responseBody);
 
             return new BookingIntegrationDefinitiveException(
-                    "Booking integration request was definitively rejected " + "(status=" + status.value() + ")");
+                    "Booking integration request was definitively rejected (status=" + status.value() + "). Details: " + responseBody);
         }
 
 

@@ -24,8 +24,8 @@ import static org.mockito.Mockito.*;
  * Unit tests for BookingExpirationServiceImpl.
  *
  * Verifies the scheduler's expiry logic:
- *  - PENDING → EXPIRING → EXPIRED (happy path)
- *  - Skip if transition already taken (cancel won the race)
+ *  - PENDING / PAYMENT_PENDING → EXPIRING → EXPIRED (happy path)
+ *  - Skip if transition already taken (cancel/confirm won the race)
  *  - Leave in EXPIRING if release fails (manual reconciliation)
  *  - Error in one booking does not stop processing others
  */
@@ -43,12 +43,12 @@ class BookingExpirationServiceImplTest {
     static final UUID FLIGHT_ID     = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
     static final UUID FARE_CLASS_ID = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
 
-    private Booking aPendingBooking() {
+    private Booking aBooking(BookingStatus status) {
         return Booking.builder()
                 .id(BOOKING_ID)
                 .flightId(FLIGHT_ID)
                 .fareClassId(FARE_CLASS_ID)
-                .status(BookingStatus.PENDING)
+                .status(status)
                 .passengerCount(2)
                 .expiresAt(LocalDateTime.now().minusMinutes(5))
                 .build();
@@ -57,10 +57,10 @@ class BookingExpirationServiceImplTest {
     @Test
     @DisplayName("happy path — PENDING → EXPIRING → release → EXPIRED")
     void whenPendingBookingExpired_shouldTransitionToExpired() {
-        Booking booking = aPendingBooking();
+        Booking booking = aBooking(BookingStatus.PENDING);
 
-        when(bookingRepository.findByStatusAndExpiresAtBeforeOrderByExpiresAtAsc(
-                eq(BookingStatus.PENDING), any(LocalDateTime.class), any(PageRequest.class)))
+        when(bookingRepository.findDueBookings(
+                any(LocalDateTime.class), any(PageRequest.class)))
                 .thenReturn(List.of(booking));
         when(bookingTransactionService.transitionStatus(BOOKING_ID, BookingStatus.PENDING, BookingStatus.EXPIRING))
                 .thenReturn(true);
@@ -68,25 +68,45 @@ class BookingExpirationServiceImplTest {
         when(bookingTransactionService.transitionStatus(BOOKING_ID, BookingStatus.EXPIRING, BookingStatus.EXPIRED))
                 .thenReturn(true);
 
-        expirationService.expirePendingBookings();
+        expirationService.expireDueBookings();
 
         verify(flightClient).releaseSeats(FLIGHT_ID, FARE_CLASS_ID, 2);
         verify(bookingTransactionService).transitionStatus(BOOKING_ID, BookingStatus.EXPIRING, BookingStatus.EXPIRED);
     }
 
     @Test
-    @DisplayName("user cancel won the race → skip expiry (no release, no EXPIRING transition)")
-    void whenCancelAlreadyWon_shouldSkipWithoutRelease() {
-        Booking booking = aPendingBooking();
+    @DisplayName("happy path — PAYMENT_PENDING → EXPIRING → release → EXPIRED")
+    void whenPaymentPendingBookingExpired_shouldTransitionToExpired() {
+        Booking booking = aBooking(BookingStatus.PAYMENT_PENDING);
 
-        when(bookingRepository.findByStatusAndExpiresAtBeforeOrderByExpiresAtAsc(
-                any(), any(), any()))
+        when(bookingRepository.findDueBookings(
+                any(LocalDateTime.class), any(PageRequest.class)))
                 .thenReturn(List.of(booking));
-        // Cancel already transitioned it
+        when(bookingTransactionService.transitionStatus(BOOKING_ID, BookingStatus.PAYMENT_PENDING, BookingStatus.EXPIRING))
+                .thenReturn(true);
+        doNothing().when(flightClient).releaseSeats(FLIGHT_ID, FARE_CLASS_ID, 2);
+        when(bookingTransactionService.transitionStatus(BOOKING_ID, BookingStatus.EXPIRING, BookingStatus.EXPIRED))
+                .thenReturn(true);
+
+        expirationService.expireDueBookings();
+
+        verify(flightClient).releaseSeats(FLIGHT_ID, FARE_CLASS_ID, 2);
+        verify(bookingTransactionService).transitionStatus(BOOKING_ID, BookingStatus.EXPIRING, BookingStatus.EXPIRED);
+    }
+
+    @Test
+    @DisplayName("another transition won the race → skip expiry (no release, no EXPIRING transition)")
+    void whenConcurrentTransitionAlreadyWon_shouldSkipWithoutRelease() {
+        Booking booking = aBooking(BookingStatus.PENDING);
+
+        when(bookingRepository.findDueBookings(
+                any(), any()))
+                .thenReturn(List.of(booking));
+        // CAS failed
         when(bookingTransactionService.transitionStatus(BOOKING_ID, BookingStatus.PENDING, BookingStatus.EXPIRING))
                 .thenReturn(false);
 
-        expirationService.expirePendingBookings();
+        expirationService.expireDueBookings();
 
         verify(flightClient, never()).releaseSeats(any(), any(), anyInt());
         verify(bookingTransactionService, never())
@@ -96,17 +116,17 @@ class BookingExpirationServiceImplTest {
     @Test
     @DisplayName("release fails during expiry → leave in EXPIRING state (manual reconciliation), EXPIRED NOT set")
     void whenReleaseFails_shouldLeaveInExpiringState() {
-        Booking booking = aPendingBooking();
+        Booking booking = aBooking(BookingStatus.PAYMENT_PENDING);
 
-        when(bookingRepository.findByStatusAndExpiresAtBeforeOrderByExpiresAtAsc(
-                any(), any(), any()))
+        when(bookingRepository.findDueBookings(
+                any(), any()))
                 .thenReturn(List.of(booking));
-        when(bookingTransactionService.transitionStatus(BOOKING_ID, BookingStatus.PENDING, BookingStatus.EXPIRING))
+        when(bookingTransactionService.transitionStatus(BOOKING_ID, BookingStatus.PAYMENT_PENDING, BookingStatus.EXPIRING))
                 .thenReturn(true);
         doThrow(new RuntimeException("flight service down"))
                 .when(flightClient).releaseSeats(any(), any(), anyInt());
 
-        expirationService.expirePendingBookings();
+        expirationService.expireDueBookings();
 
         // Must NOT transition to EXPIRED — leave in EXPIRING for manual reconciliation
         verify(bookingTransactionService, never())
@@ -117,18 +137,18 @@ class BookingExpirationServiceImplTest {
     @DisplayName("error in one booking → other bookings in same batch still processed")
     void whenOneBookingFails_shouldContinueProcessingOthers() {
         UUID bookingId2 = UUID.fromString("ffffffff-ffff-ffff-ffff-ffffffffffff");
-        Booking failing = aPendingBooking();
+        Booking failing = aBooking(BookingStatus.PENDING);
         Booking other = Booking.builder()
                 .id(bookingId2)
                 .flightId(FLIGHT_ID)
                 .fareClassId(FARE_CLASS_ID)
-                .status(BookingStatus.PENDING)
+                .status(BookingStatus.PAYMENT_PENDING)
                 .passengerCount(1)
                 .expiresAt(LocalDateTime.now().minusMinutes(1))
                 .build();
 
-        when(bookingRepository.findByStatusAndExpiresAtBeforeOrderByExpiresAtAsc(
-                any(), any(), any()))
+        when(bookingRepository.findDueBookings(
+                any(), any()))
                 .thenReturn(List.of(failing, other));
 
         // First booking: transition OK, but release throws
@@ -138,13 +158,13 @@ class BookingExpirationServiceImplTest {
                 .when(flightClient).releaseSeats(eq(FLIGHT_ID), eq(FARE_CLASS_ID), eq(2));
 
         // Second booking: happy path
-        when(bookingTransactionService.transitionStatus(bookingId2, BookingStatus.PENDING, BookingStatus.EXPIRING))
+        when(bookingTransactionService.transitionStatus(bookingId2, BookingStatus.PAYMENT_PENDING, BookingStatus.EXPIRING))
                 .thenReturn(true);
         doNothing().when(flightClient).releaseSeats(FLIGHT_ID, FARE_CLASS_ID, 1);
         when(bookingTransactionService.transitionStatus(bookingId2, BookingStatus.EXPIRING, BookingStatus.EXPIRED))
                 .thenReturn(true);
 
-        expirationService.expirePendingBookings();
+        expirationService.expireDueBookings();
 
         // Second booking was processed successfully despite first failing
         verify(bookingTransactionService)
@@ -154,11 +174,11 @@ class BookingExpirationServiceImplTest {
     @Test
     @DisplayName("no expired bookings → no releases, no transitions")
     void whenNoExpiredBookings_shouldDoNothing() {
-        when(bookingRepository.findByStatusAndExpiresAtBeforeOrderByExpiresAtAsc(
-                any(), any(), any()))
+        when(bookingRepository.findDueBookings(
+                any(), any()))
                 .thenReturn(List.of());
 
-        expirationService.expirePendingBookings();
+        expirationService.expireDueBookings();
 
         verify(flightClient, never()).releaseSeats(any(), any(), anyInt());
         verify(bookingTransactionService, never()).transitionStatus(any(), any(), any());

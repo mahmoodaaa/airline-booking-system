@@ -2,6 +2,7 @@ package com.project.paymentservice.webhook.handler;
 
 import com.project.paymentservice.service.PaymentTransactionService;
 import com.project.paymentservice.service.BookingConfirmationOrchestrator;
+
 import com.project.paymentservice.service.model.PaymentSuccessResult;
 import com.stripe.model.Event;
 import com.stripe.model.StripeObject;
@@ -29,6 +30,7 @@ public class StripeCheckoutCompletedHandlerImpl implements StripeCheckoutComplet
 
     private final PaymentTransactionService paymentTransactionService;
     private final BookingConfirmationOrchestrator bookingConfirmationOrchestrator;
+
 
     @Override
     public void handle(Event event) {
@@ -154,9 +156,10 @@ public class StripeCheckoutCompletedHandlerImpl implements StripeCheckoutComplet
         if (!result.canonicalSuccess()) {
 
             log.error(
-                    "CRITICAL non-canonical Stripe financial success detected. " +
-                            "paymentId={} bookingId={} attemptId={}. " +
-                            "Booking confirmation will NOT be triggered.",
+                    "CRITICAL: Non-canonical financial success detected. " +
+                    "paymentId={} bookingId={} attemptId={}. " +
+                    "Booking will NOT be confirmed from this attempt. " +
+                    "Manual financial intervention may be required.",
                     result.paymentId(),
                     result.bookingId(),
                     result.attemptId()
@@ -166,32 +169,7 @@ public class StripeCheckoutCompletedHandlerImpl implements StripeCheckoutComplet
         }
 
 
-        // ============================================================
-        // 2. Canonical historical success but Booking confirmation
-        //    is no longer eligible.
-        //
-        // Primary example:
-        //
-        // Payment = REFUNDED
-        // old checkout.session.completed replay arrives.
-        //
-        // Financial history remains valid, but we MUST NOT attempt
-        // to confirm the Booking again.
-        // ============================================================
 
-        if (!result.bookingConfirmationEligible()) {
-
-            log.info(
-                    "Skipping Booking confirmation for canonical financial " +
-                            "success because confirmation is no longer eligible. " +
-                            "paymentId={} bookingId={} attemptId={}",
-                    result.paymentId(),
-                    result.bookingId(),
-                    result.attemptId()
-            );
-
-            return;
-        }
 
 
         // ============================================================

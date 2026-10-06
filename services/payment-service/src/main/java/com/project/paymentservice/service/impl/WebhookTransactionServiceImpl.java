@@ -14,6 +14,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.UUID;
 
 @Slf4j
@@ -36,7 +37,7 @@ public class WebhookTransactionServiceImpl implements WebhookTransactionService 
 
         validateIdentity(stripeEventId, eventType);
 
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
 
 
         int inserted = webhookEventRepository.insertIfAbsent(
@@ -113,7 +114,7 @@ public class WebhookTransactionServiceImpl implements WebhookTransactionService 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public WebhookProcessingDecision claimForProcessing(String stripeEventId) {
 
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
 
 
         int updated = webhookEventRepository.claimForProcessing(
@@ -188,7 +189,7 @@ public class WebhookTransactionServiceImpl implements WebhookTransactionService 
                         stripeEventId,
                         WebhookProcessingStatus.PROCESSING,
                         WebhookProcessingStatus.PROCESSED,
-                        LocalDateTime.now()
+                        LocalDateTime.now(ZoneOffset.UTC)
                 );
 
 
@@ -227,7 +228,7 @@ public class WebhookTransactionServiceImpl implements WebhookTransactionService 
                         WebhookProcessingStatus.PROCESSING,
                         WebhookProcessingStatus.FAILED,
                         safeError,
-                        LocalDateTime.now()
+                        LocalDateTime.now(ZoneOffset.UTC)
                 );
 
 

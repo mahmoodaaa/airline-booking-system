@@ -3,11 +3,16 @@ package com.project.bookingservice.service;
 public interface BookingExpirationService {
 
     /**
-     * Scans PENDING bookings past their expiresAt, transitions them atomically:
-     *   PENDING → EXPIRING → (release seats) → EXPIRED
+     * Expires all due active reservations using the single effective expiresAt.
      *
-     * Runs in batches to avoid loading the full table into memory.
-     * Called exclusively by the @Scheduled cleanup job.
+     * Eligible states:
+     *   PENDING
+     *   PAYMENT_PENDING
+     *
+     * Flow:
+     *   active state -> EXPIRING -> release seats -> EXPIRED
+     *
+     * Processing is bounded and batched.
      */
-    void expirePendingBookings();
+    void expireDueBookings();
 }

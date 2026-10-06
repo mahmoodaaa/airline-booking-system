@@ -6,6 +6,7 @@ import com.project.bookingservice.dto.request.BookingRequest;
 import com.project.bookingservice.dto.request.PassengerRequest;
 import com.project.bookingservice.dto.response.BookingResponse;
 import com.project.bookingservice.dto.response.CreateBookingResult;
+import com.project.bookingservice.dto.response.PaymentContextResponse;
 import com.project.bookingservice.entity.Booking;
 import com.project.bookingservice.entity.BookingPassenger;
 import com.project.bookingservice.enums.BookingStatus;
@@ -540,27 +541,62 @@ class BookingServiceImplTest {
     class InternalPayment {
 
         @Test
-        @DisplayName("getPaymentContext → happy path")
-        void getPaymentContext_happyPath() {
-            Booking booking = aClaimWith(BookingStatus.PENDING);
-            booking.setExpiresAt(LocalDateTime.now().plusMinutes(30));
+        @DisplayName("startPayment → happy path PENDING to PAYMENT_PENDING")
+        void startPayment_happyPath() {
+            Booking pendingBooking = aClaimWith(BookingStatus.PENDING);
+            pendingBooking.setExpiresAt(LocalDateTime.now().plusMinutes(30));
 
-            when(bookingRepository.findById(BOOKING_ID)).thenReturn(Optional.of(booking));
+            Booking updatedBooking = aClaimWith(BookingStatus.PAYMENT_PENDING);
+            updatedBooking.setExpiresAt(LocalDateTime.now().plusMinutes(40));
 
-            var result = bookingService.getPaymentContext(BOOKING_ID);
+            PaymentContextResponse expectedResponse = PaymentContextResponse.builder()
+                    .bookingId(BOOKING_ID)
+                    .userId(USER_ID)
+                    .status(BookingStatus.PAYMENT_PENDING)
+                    .totalAmount(updatedBooking.getTotalAmount())
+                    .currency(updatedBooking.getCurrency())
+                    .expiresAt(updatedBooking.getExpiresAt())
+                    .build();
+
+            when(bookingRepository.findByIdAndUserId(BOOKING_ID, USER_ID))
+                    .thenReturn(Optional.of(pendingBooking), Optional.of(updatedBooking));
+            when(bookingTransactionService.startPaymentWindow(eq(BOOKING_ID), eq(USER_ID), any(), any())).thenReturn(true);
+            when(bookingMapper.toPaymentContextResponse(updatedBooking)).thenReturn(expectedResponse);
+
+            var result = bookingService.startPayment(BOOKING_ID, USER_ID);
 
             assertThat(result.getBookingId()).isEqualTo(BOOKING_ID);
             assertThat(result.getUserId()).isEqualTo(USER_ID);
-            assertThat(result.getStatus()).isEqualTo(BookingStatus.PENDING);
-            assertThat(result.getTotalAmount()).isEqualTo(booking.getTotalAmount());
-            assertThat(result.getCurrency()).isEqualTo(booking.getCurrency());
-            assertThat(result.getExpiresAt()).isEqualTo(booking.getExpiresAt());
+            assertThat(result.getStatus()).isEqualTo(BookingStatus.PAYMENT_PENDING);
+            assertThat(result.getExpiresAt()).isEqualTo(updatedBooking.getExpiresAt());
+        }
+
+        @Test
+        @DisplayName("startPayment → already PAYMENT_PENDING with valid expiresAt returns existing context")
+        void startPayment_idempotentReturnsExisting() {
+            Booking existingHold = aClaimWith(BookingStatus.PAYMENT_PENDING);
+            existingHold.setExpiresAt(LocalDateTime.now().plusMinutes(20)); // valid hold
+
+            PaymentContextResponse expectedResponse = PaymentContextResponse.builder()
+                    .bookingId(BOOKING_ID)
+                    .status(BookingStatus.PAYMENT_PENDING)
+                    .expiresAt(existingHold.getExpiresAt())
+                    .build();
+
+            when(bookingRepository.findByIdAndUserId(BOOKING_ID, USER_ID)).thenReturn(Optional.of(existingHold));
+            when(bookingMapper.toPaymentContextResponse(existingHold)).thenReturn(expectedResponse);
+
+            var result = bookingService.startPayment(BOOKING_ID, USER_ID);
+
+            assertThat(result.getBookingId()).isEqualTo(BOOKING_ID);
+            assertThat(result.getStatus()).isEqualTo(BookingStatus.PAYMENT_PENDING);
+            verify(bookingTransactionService, never()).startPaymentWindow(any(), any(), any(), any());
         }
 
         @Test
         @DisplayName("confirmPayment → happy path")
         void confirmPayment_happyPath() {
-            Booking booking = aClaimWith(BookingStatus.PENDING);
+            Booking booking = aClaimWith(BookingStatus.PAYMENT_PENDING);
             UUID paymentId = UUID.randomUUID();
             when(bookingRepository.findById(BOOKING_ID)).thenReturn(Optional.of(booking));
             when(bookingTransactionService.confirmPayment(eq(BOOKING_ID), eq(paymentId), any()))
@@ -601,9 +637,9 @@ class BookingServiceImplTest {
         }
 
         @Test
-        @DisplayName("confirmPayment → fail if not PENDING or CONFIRMED")
+        @DisplayName("confirmPayment → fail if not PAYMENT_PENDING or CONFIRMED")
         void confirmPayment_invalidState() {
-            Booking booking = aClaimWith(BookingStatus.CANCELLED);
+            Booking booking = aClaimWith(BookingStatus.PENDING); // MUST be PAYMENT_PENDING
             UUID paymentId = UUID.randomUUID();
             when(bookingRepository.findById(BOOKING_ID)).thenReturn(Optional.of(booking));
 
@@ -613,13 +649,12 @@ class BookingServiceImplTest {
         }
 
         @Test
-        @DisplayName("confirmPayment → Initially PENDING CAS returns false reload = CONFIRMED same paymentId → success")
+        @DisplayName("confirmPayment → Initially PAYMENT_PENDING CAS returns false reload = CONFIRMED same paymentId → success")
         void confirmPayment_concurrentUpdateSamePaymentId() {
-            Booking booking = aClaimWith(BookingStatus.PENDING);
+            Booking booking = aClaimWith(BookingStatus.PAYMENT_PENDING);
             UUID paymentId = UUID.randomUUID();
             when(bookingRepository.findById(BOOKING_ID))
-                .thenReturn(Optional.of(booking)) // initial load
-                .thenReturn(Optional.of(booking)); // reload after cas failure
+                .thenReturn(Optional.of(booking), Optional.of(booking)); // initial load then reload after cas failure
                 
             when(bookingTransactionService.confirmPayment(eq(BOOKING_ID), eq(paymentId), any()))
                     .thenAnswer(invocation -> {
@@ -636,14 +671,13 @@ class BookingServiceImplTest {
         }
         
         @Test
-        @DisplayName("confirmPayment → Initially PENDING CAS returns false reload = CONFIRMED different paymentId → 409")
+        @DisplayName("confirmPayment → Initially PAYMENT_PENDING CAS returns false reload = CONFIRMED different paymentId → 409")
         void confirmPayment_concurrentUpdateDifferentPaymentId() {
-            Booking booking = aClaimWith(BookingStatus.PENDING);
+            Booking booking = aClaimWith(BookingStatus.PAYMENT_PENDING);
             UUID paymentId = UUID.randomUUID();
             UUID otherPaymentId = UUID.randomUUID();
             when(bookingRepository.findById(BOOKING_ID))
-                .thenReturn(Optional.of(booking)) // initial load
-                .thenReturn(Optional.of(booking)); // reload after cas failure
+                .thenReturn(Optional.of(booking), Optional.of(booking)); // initial load then reload after cas failure
                 
             when(bookingTransactionService.confirmPayment(eq(BOOKING_ID), eq(paymentId), any()))
                     .thenAnswer(invocation -> {
@@ -659,24 +693,23 @@ class BookingServiceImplTest {
         }
         
         @Test
-        @DisplayName("confirmPayment → Initially PENDING CAS loses to EXPIRING/CANCELLING → 409")
-        void confirmPayment_concurrentUpdateLosesToCancel() {
-            Booking booking = aClaimWith(BookingStatus.PENDING);
+        @DisplayName("confirmPayment → Initially PAYMENT_PENDING CAS loses to EXPIRING/EXPIRED → 409")
+        void confirmPayment_concurrentUpdateLosesToExpire() {
+            Booking booking = aClaimWith(BookingStatus.PAYMENT_PENDING);
             UUID paymentId = UUID.randomUUID();
             when(bookingRepository.findById(BOOKING_ID))
-                .thenReturn(Optional.of(booking)) // initial load
-                .thenReturn(Optional.of(booking)); // reload after cas failure
+                .thenReturn(Optional.of(booking), Optional.of(booking)); // initial load then reload after cas failure
                 
             when(bookingTransactionService.confirmPayment(eq(BOOKING_ID), eq(paymentId), any()))
                     .thenAnswer(invocation -> {
-                        // simulate concurrent cancel
-                        booking.setStatus(BookingStatus.CANCELLING);
+                        // simulate concurrent expiration
+                        booking.setStatus(BookingStatus.EXPIRED);
                         return false; 
                     });
 
             assertThatThrownBy(() -> bookingService.confirmPayment(BOOKING_ID, paymentId))
                     .isInstanceOf(com.project.common.exception.ConflictException.class)
-                    .hasMessageContaining("Current status: CANCELLING");
+                    .hasMessageContaining("Booking payment hold expired");
         }
     }
 }
