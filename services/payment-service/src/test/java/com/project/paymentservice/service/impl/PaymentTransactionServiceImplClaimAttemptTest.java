@@ -22,7 +22,8 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
-import java.util.EnumSet;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -34,12 +35,6 @@ import static org.mockito.Mockito.*;
 
 /**
  * Unit tests for {@link PaymentTransactionServiceImpl#claimAttemptForInitiation}.
- *
- * This method is the financial concurrency gate of the payment system.
- * Every guard path is tested explicitly.
- *
- * Test naming convention:
- *   TC-XX matches the reference doc scenario list in PAYMENT_SERVICE_IMPL_REFERENCE.md
  */
 @ExtendWith(MockitoExtension.class)
 @DisplayName("PaymentTransactionServiceImpl — claimAttemptForInitiation()")
@@ -66,6 +61,7 @@ class PaymentTransactionServiceImplClaimAttemptTest {
 
     private Payment pendingPayment;
     private PaymentIdempotencyRecord unboundRecord;
+    private LocalDateTime latestCheckoutStartAt;
 
     @BeforeEach
     void setUp() {
@@ -82,6 +78,8 @@ class PaymentTransactionServiceImplClaimAttemptTest {
         unboundRecord.setId(IDEMPOTENCY_ID);
         unboundRecord.setPaymentId(null);
         unboundRecord.setAttemptId(null);
+        
+        latestCheckoutStartAt = LocalDateTime.now(ZoneOffset.UTC).plusMinutes(10);
     }
 
     // =========================================================================
@@ -108,7 +106,7 @@ class PaymentTransactionServiceImplClaimAttemptTest {
                     .thenReturn(unboundRecord);
 
             AttemptClaimResult result = sut.claimAttemptForInitiation(
-                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD
+                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD, latestCheckoutStartAt
             );
 
             assertThat(result.createdNewAttempt()).isTrue();
@@ -145,7 +143,7 @@ class PaymentTransactionServiceImplClaimAttemptTest {
             when(attemptRepository.findById(ATTEMPT_ID)).thenReturn(Optional.of(mappedAttempt));
 
             AttemptClaimResult result = sut.claimAttemptForInitiation(
-                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD
+                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD, latestCheckoutStartAt
             );
 
             assertThat(result.createdNewAttempt()).isFalse();
@@ -172,7 +170,7 @@ class PaymentTransactionServiceImplClaimAttemptTest {
             when(attemptRepository.findById(ATTEMPT_ID)).thenReturn(Optional.of(mappedAttempt));
 
             assertThatThrownBy(() -> sut.claimAttemptForInitiation(
-                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD
+                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD, latestCheckoutStartAt
             )).isInstanceOf(ConflictException.class);
         }
     }
@@ -204,7 +202,7 @@ class PaymentTransactionServiceImplClaimAttemptTest {
             when(attemptRepository.findById(ATTEMPT_ID)).thenReturn(Optional.of(canonicalAttempt));
 
             AttemptClaimResult result = sut.claimAttemptForInitiation(
-                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD
+                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD, latestCheckoutStartAt
             );
 
             assertThat(result.createdNewAttempt()).isFalse();
@@ -223,7 +221,7 @@ class PaymentTransactionServiceImplClaimAttemptTest {
             givenIdempotencyRecord(unboundRecord);
 
             assertThatThrownBy(() -> sut.claimAttemptForInitiation(
-                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD
+                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD, latestCheckoutStartAt
             )).isInstanceOf(ConflictException.class)
               .hasMessageContaining("already been paid");
         }
@@ -242,30 +240,12 @@ class PaymentTransactionServiceImplClaimAttemptTest {
             givenIdempotencyRecord(unboundRecord);
 
             assertThatThrownBy(() -> sut.claimAttemptForInitiation(
-                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD
+                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD, latestCheckoutStartAt
             )).isInstanceOf(IllegalStateException.class)
               .hasMessageContaining("no canonical successful attempt");
         }
 
-        @Test
-        @DisplayName("TC-07: REFUNDED payment + any key → ConflictException")
-        void rejectsAnyAttemptOnRefundedPayment() {
 
-            Payment refundedPayment = Payment.builder()
-                    .id(PAYMENT_ID)
-                    .status(PaymentStatus.REFUNDED)
-                    .succeededAttemptId(ATTEMPT_ID)
-                    .build();
-
-            // unboundRecord is a brand-new key (attemptId = null)
-            givenLockedPayment(refundedPayment);
-            givenIdempotencyRecord(unboundRecord);
-
-            assertThatThrownBy(() -> sut.claimAttemptForInitiation(
-                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD
-            )).isInstanceOf(ConflictException.class)
-              .hasMessageContaining("already been paid");
-        }
     }
 
     // =========================================================================
@@ -279,34 +259,11 @@ class PaymentTransactionServiceImplClaimAttemptTest {
         @Test
         @DisplayName("TC-08: Unknown/future status (not PENDING) → ConflictException")
         void rejectsUnexpectedNonPendingStatus() {
-
-            // Simulate a future status like REFUND_PENDING by using a payment that
-            // is neither PENDING, SUCCEEDED, nor REFUNDED. We can't add a new enum
-            // value here, but we verify the PENDING != check by temporarily using
-            // a Payment with SUCCEEDED that has no succeededAttemptId skipped,
-            // and instead just mock a payment in a state that passes the terminal
-            // check but fails the PENDING check.
-            //
-            // This TC documents the invariant: the guard exists for future statuses.
-            // The meaningful verification is that Payment.PENDING is the ONLY
-            // status that proceeds to active-attempt lookup.
-            //
-            // Verified indirectly: TC-04..07 cover SUCCEEDED/REFUNDED.
-            // TC-01 covers PENDING. This test covers the conceptual boundary.
-
-            // To make this concrete: if Payment.status were a String field
-            // we could test any value. Since it's an enum we verify the
-            // existing non-PENDING, non-terminal values are not present
-            // (enum exhaustion is compile-time guaranteed for PENDING only).
-            //
-            // Therefore this TC documents the design decision rather than
-            // a mechanical assertion. It is preserved for future-proofing.
             assertThat(PaymentStatus.values())
                     .as("If a new PaymentStatus is added, update claimAttemptForInitiation()")
                     .containsExactlyInAnyOrder(
                             PaymentStatus.PENDING,
-                            PaymentStatus.SUCCEEDED,
-                            PaymentStatus.REFUNDED
+                            PaymentStatus.SUCCEEDED
                     );
         }
     }
@@ -330,7 +287,7 @@ class PaymentTransactionServiceImplClaimAttemptTest {
             when(idempotencyRepository.saveAndFlush(any())).thenReturn(unboundRecord);
 
             AttemptClaimResult result = sut.claimAttemptForInitiation(
-                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD
+                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD, latestCheckoutStartAt
             );
 
             assertThat(result.createdNewAttempt()).isFalse();
@@ -349,7 +306,7 @@ class PaymentTransactionServiceImplClaimAttemptTest {
             when(idempotencyRepository.saveAndFlush(any())).thenReturn(unboundRecord);
 
             AttemptClaimResult result = sut.claimAttemptForInitiation(
-                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD
+                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD, latestCheckoutStartAt
             );
 
             assertThat(result.createdNewAttempt()).isFalse();
@@ -367,7 +324,7 @@ class PaymentTransactionServiceImplClaimAttemptTest {
             when(idempotencyRepository.saveAndFlush(any())).thenReturn(unboundRecord);
 
             AttemptClaimResult result = sut.claimAttemptForInitiation(
-                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD
+                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD, latestCheckoutStartAt
             );
 
             assertThat(result.createdNewAttempt()).isFalse();
@@ -396,22 +353,47 @@ class PaymentTransactionServiceImplClaimAttemptTest {
             givenActiveAttempt(paypalAttempt);
 
             assertThatThrownBy(() -> sut.claimAttemptForInitiation(
-                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER /* STRIPE */, METHOD
+                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER /* STRIPE */, METHOD, latestCheckoutStartAt
             )).isInstanceOf(ConflictException.class)
               .hasMessageContaining("different");
         }
     }
-
+    
     // =========================================================================
-    // TC-13 — Cross-payment idempotency contamination
+    // TC-13 — Expiry Guard
     // =========================================================================
 
     @Nested
-    @DisplayName("TC-13 | Cross-payment idempotency contamination")
+    @DisplayName("TC-13 | Expiry Guard")
+    class ExpiryGuard {
+
+        @Test
+        @DisplayName("TC-13: No active attempt, but now > latestCheckoutStartAt → ConflictException")
+        void rejectsNewAttemptIfPastLatestCheckoutStartAt() {
+            givenLockedPayment(pendingPayment);
+            givenIdempotencyRecord(unboundRecord);
+            givenNoActiveAttempt();
+
+            // Set latestCheckoutStartAt in the past
+            LocalDateTime pastDeadline = LocalDateTime.now(ZoneOffset.UTC).minusMinutes(1);
+
+            assertThatThrownBy(() -> sut.claimAttemptForInitiation(
+                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD, pastDeadline
+            )).isInstanceOf(ConflictException.class)
+              .hasMessageContaining("Not enough time remaining to retry payment");
+        }
+    }
+
+    // =========================================================================
+    // TC-14 — Cross-payment idempotency contamination
+    // =========================================================================
+
+    @Nested
+    @DisplayName("TC-14 | Cross-payment idempotency contamination")
     class CrossPaymentContamination {
 
         @Test
-        @DisplayName("TC-13: Idempotency record paymentId != argument paymentId → IllegalStateException")
+        @DisplayName("TC-14: Idempotency record paymentId != argument paymentId → IllegalStateException")
         void throwsWhenIdempotencyRecordLinkedToAnotherPayment() {
 
             UUID otherPaymentId = UUID.randomUUID();
@@ -425,7 +407,7 @@ class PaymentTransactionServiceImplClaimAttemptTest {
             givenIdempotencyRecord(foreignRecord);
 
             assertThatThrownBy(() -> sut.claimAttemptForInitiation(
-                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD
+                    PAYMENT_ID, IDEMPOTENCY_ID, PROVIDER, METHOD, latestCheckoutStartAt
             )).isInstanceOf(IllegalStateException.class)
               .hasMessageContaining("already linked to another Payment");
         }

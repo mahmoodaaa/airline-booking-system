@@ -20,8 +20,9 @@ import java.util.UUID;
  *     PaymentAttempt is created (INITIALIZING). Reusing it on retry
  *     lets the provider deduplicate concurrent/retry calls safely.
  *
- *   - successUrl/cancelUrl are resolved by the service layer from
- *     server configuration, not from the client request.
+ *   - bookingExpiresAt is the Booking-side effective payment window
+ *     deadline. The gateway MUST ensure the provider checkout expires
+ *     strictly before this timestamp.
  */
 public record CheckoutRequest(
 
@@ -37,7 +38,15 @@ public record CheckoutRequest(
 
         PaymentMethodType paymentMethod,
 
-        String providerIdempotencyKey
+        String providerIdempotencyKey,
+
+        /**
+         * Booking effective payment-window deadline (UTC).
+         *
+         * Upper bound for provider checkout expiry.
+         * Provider checkout MUST expire before this timestamp.
+         */
+        java.time.LocalDateTime bookingExpiresAt
 
 ) {
 }

@@ -18,19 +18,28 @@ import java.util.UUID;
 @Repository
 public interface BookingRepository extends JpaRepository<Booking, UUID> {
 
-    // 1. Idempotency
     Optional<Booking> findByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey);
 
-    // 2. My Bookings
-    Page<Booking> findByUserId(UUID userId, Pageable pageable);
+    Page<Booking> findByUserId(
+            UUID userId,
+            Pageable pageable
+    );
 
-    // 3. Owner validation
-    Optional<Booking> findByIdAndUserId(UUID bookingId,UUID userId);
+    Optional<Booking> findByIdAndUserId(UUID bookingId, UUID userId);
 
-    // 4. Scheduler - expired PENDING bookings
-    List<Booking> findByStatusAndExpiresAtBeforeOrderByExpiresAtAsc(BookingStatus status, LocalDateTime time, Pageable pageable);
+    // One unified expiry query.
+    @Query(
+            value = """
+                    SELECT *
+                      FROM bookings
+                     WHERE status IN ('PENDING', 'PAYMENT_PENDING')
+                       AND expires_at <= :now
+                     ORDER BY expires_at ASC
+                    """,
+            nativeQuery = true
+    )
+    List<Booking> findDueBookings(@Param("now") LocalDateTime now, Pageable pageable);
 
-    // 5. Atomic state transition
     @Modifying(
             flushAutomatically = true,
             clearAutomatically = true
@@ -50,26 +59,51 @@ public interface BookingRepository extends JpaRepository<Booking, UUID> {
             @Param("updatedAt") LocalDateTime updatedAt
     );
 
-    // 6. Atomic payment confirmation
     @Modifying(
             flushAutomatically = true,
             clearAutomatically = true
     )
     @Query("""
         UPDATE Booking b
-           SET b.status = 'CONFIRMED',
-               b.paymentId = :paymentId,
-               b.confirmedAt = :confirmedAt,
+           SET b.status = :newStatus,
+               b.expiresAt = :newExpiresAt,
                b.version = b.version + 1,
-               b.updatedAt = :updatedAt
+               b.updatedAt = :now
          WHERE b.id = :bookingId
-           AND b.status = 'PENDING'
+           AND b.userId = :userId
+           AND b.status = :expectedStatus
+           AND b.expiresAt > :now
+    """)
+    int startPaymentWindow(
+            @Param("bookingId") UUID bookingId,
+            @Param("userId") UUID userId,
+            @Param("expectedStatus") BookingStatus expectedStatus,
+            @Param("newStatus") BookingStatus newStatus,
+            @Param("newExpiresAt") LocalDateTime newExpiresAt,
+            @Param("now") LocalDateTime now
+    );
+
+    @Modifying(
+            flushAutomatically = true,
+            clearAutomatically = true
+    )
+    @Query("""
+        UPDATE Booking b
+           SET b.status = :newStatus,
+               b.paymentId = :paymentId,
+               b.confirmedAt = :now,
+               b.version = b.version + 1,
+               b.updatedAt = :now
+         WHERE b.id = :bookingId
+           AND b.status = :expectedStatus
+           AND b.expiresAt > :now
            AND b.paymentId IS NULL
     """)
     int confirmPayment(
             @Param("bookingId") UUID bookingId,
             @Param("paymentId") UUID paymentId,
-            @Param("confirmedAt") LocalDateTime confirmedAt,
-            @Param("updatedAt") LocalDateTime updatedAt
+            @Param("expectedStatus") BookingStatus expectedStatus,
+            @Param("newStatus") BookingStatus newStatus,
+            @Param("now") LocalDateTime now
     );
 }

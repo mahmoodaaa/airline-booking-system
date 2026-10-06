@@ -3,6 +3,7 @@ package com.project.bookingservice.service;
 import com.project.bookingservice.dto.request.BookingRequest;
 import com.project.bookingservice.dto.response.BookingResponse;
 import com.project.bookingservice.dto.response.CreateBookingResult;
+import com.project.bookingservice.dto.response.PaymentContextResponse;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 
@@ -34,7 +35,19 @@ public interface BookingService {
     // INTERNAL (Payment Service)
     // ==============================
 
-    com.project.bookingservice.dto.response.PaymentContextResponse getPaymentContext(UUID bookingId);
-
+    /**
+     * Atomically transitions PENDING -> PAYMENT_PENDING and returns
+     * the authoritative payment context.
+     *
+     * The existing expiresAt is replaced once with the protected
+     * payment-window deadline.
+     *
+     * Idempotent:
+     * if already PAYMENT_PENDING with expiresAt > now,
+     * return the existing context without extending expiresAt.
+     *
+     * Throws if Booking is no longer eligible.
+     */
+    PaymentContextResponse startPayment(UUID bookingId, UUID userId);
     void confirmPayment(UUID bookingId, UUID paymentId);
 }

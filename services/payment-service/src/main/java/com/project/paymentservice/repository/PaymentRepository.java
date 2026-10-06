@@ -100,6 +100,7 @@ public interface PaymentRepository extends JpaRepository<Payment, UUID> {
             currency,
             status,
             booking_confirmation_status,
+            refund_status,
             version,
             created_at,
             updated_at
@@ -112,9 +113,10 @@ public interface PaymentRepository extends JpaRepository<Payment, UUID> {
             :currency,
             'PENDING',
             'NOT_STARTED',
+            'NOT_STARTED',
             0,
-            CURRENT_TIMESTAMP,
-            CURRENT_TIMESTAMP
+            :createdAt,
+            :updatedAt
         )
         ON CONFLICT (booking_id)
         DO NOTHING
@@ -124,6 +126,8 @@ public interface PaymentRepository extends JpaRepository<Payment, UUID> {
             @Param("bookingId") UUID bookingId,
             @Param("userId") UUID userId,
             @Param("amount") BigDecimal amount,
-            @Param("currency") String currency
+            @Param("currency") String currency,
+            @Param("createdAt") LocalDateTime createdAt,
+            @Param("updatedAt") LocalDateTime updatedAt
     );
 }

@@ -14,12 +14,19 @@ public class BookingCleanupJob {
     private final BookingExpirationService bookingExpirationService;
 
     /**
-     * Runs every 60 seconds after previous execution completes.
-     * fixedDelay ensures no overlap if expiry takes longer than 60s.
+     * Runs after the previous execution completes.
+     *
+     * One sweep handles both:
+     *   PENDING
+     *   PAYMENT_PENDING
+     *
+     * Both use the same effective expiresAt deadline.
      */
     @Scheduled(fixedDelay = 60_000)
     public void cleanup() {
+
         log.debug("BookingCleanupJob triggered");
-        bookingExpirationService.expirePendingBookings();
+
+        bookingExpirationService.expireDueBookings();
     }
 }

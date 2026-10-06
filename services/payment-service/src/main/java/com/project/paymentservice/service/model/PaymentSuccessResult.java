@@ -10,9 +10,7 @@ public record PaymentSuccessResult(
 
         UUID attemptId,
 
-        boolean canonicalSuccess,
-
-        boolean bookingConfirmationEligible
+        boolean canonicalSuccess
 
 ) {
 }

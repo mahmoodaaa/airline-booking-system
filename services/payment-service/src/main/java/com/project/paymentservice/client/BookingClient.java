@@ -21,11 +21,11 @@ public class BookingClient {
 
     private final BookingFeignClient feignClient;
 
-
-    public BookingPaymentContext getPaymentContext(UUID bookingId) {
+    public BookingPaymentContext startPayment(UUID bookingId, UUID userId) {
 
         try {
-            ApiResponse<BookingPaymentContext> response = feignClient.getPaymentContext(bookingId);
+            com.project.paymentservice.client.dto.StartPaymentRequest request = new com.project.paymentservice.client.dto.StartPaymentRequest(userId);
+            ApiResponse<BookingPaymentContext> response = feignClient.startPayment(bookingId, request);
 
             if (response == null || response.getData() == null) {
 
@@ -50,7 +50,6 @@ public class BookingClient {
             throw new BookingIntegrationAmbiguousException("Unexpected Booking service communication failure", e);
         }
     }
-
 
     public void confirmBooking(UUID bookingId, UUID paymentId) {
 

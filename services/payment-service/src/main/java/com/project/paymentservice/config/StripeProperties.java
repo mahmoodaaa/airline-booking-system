@@ -37,9 +37,17 @@ public class StripeProperties {
     private String cancelUrl;
 
     /**
-     * Stripe Checkout Session lifetime.
+     * Stripe Checkout Session lifetime (minutes).
      *
-     * Current Sprint 5 default: 30 minutes.
+     * Booking payment window is currently 45 minutes.
+     * Checkout is configured for 40 minutes, giving a nominal
+     * ~5-minute Booking-side margin for provider processing,
+     * webhook delivery and Booking confirmation.
+     *
+     * Actual margin may be slightly smaller due to application
+     * and network processing before Stripe creates the Session.
+     *
+     * Stripe minimum: 30 minutes. Maximum: 24 hours.
      */
-    private long checkoutExpiryMinutes = 30;
+    private long checkoutExpiryMinutes = 40;
 }

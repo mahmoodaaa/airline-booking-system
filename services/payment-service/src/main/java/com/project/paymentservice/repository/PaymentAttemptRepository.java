@@ -19,7 +19,7 @@ public interface PaymentAttemptRepository
     /**
      * Finds the currently unresolved attempt for a Payment.
      *
-     * Expected active statuses in Sprint 5:
+     * Expected active statuses:
      * INITIALIZING, OPEN, UNKNOWN.
      *
      * Must be used while the parent Payment row is protected

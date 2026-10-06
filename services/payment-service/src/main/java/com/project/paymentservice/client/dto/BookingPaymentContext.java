@@ -10,20 +10,9 @@ import java.util.UUID;
 
 /**
  * DTO returned by booking-service internal endpoint:
- * GET /internal/bookings/{bookingId}/payment-context
+ * POST /internal/bookings/{bookingId}/start-payment
  *
- * Contains the minimum data payment-service needs to validate
- * and initiate a charge. All business guard checks are performed
- * by payment-service after receiving this context:
- *
- *   status     == "PENDING"?
- *   userId     == authenticated customer?
- *   expiresAt  > now?
- *   totalAmount valid (> 0)?
- *   currency   supported?
- *
- * status is kept as String intentionally — avoids sharing BookingStatus
- * business enum across service boundaries.
+ * Contains the authoritative context required to build the payment.
  */
 @Getter
 @Setter
@@ -34,14 +23,16 @@ public class BookingPaymentContext {
     private UUID userId;
 
     private BigDecimal totalAmount;
-    private String currency;        // ISO-4217, e.g. "USD"
+    private String currency;
 
-    private String status;          // "PENDING" expected; anything else is rejected
+    // PAYMENT_PENDING expected
+    private String status;
 
     /**
-     * Booking reservation expiry time (UTC).
-     * Payment-service checks expiresAt > now before initiating charge.
-     * A booking that expires mid-flow is handled via CAS + technical refund.
+     * Current effective Booking reservation deadline.
+     *
+     * While PAYMENT_PENDING this is the Booking-side
+     * deadline by which payment + confirmation must complete.
      */
     private LocalDateTime expiresAt;
 }

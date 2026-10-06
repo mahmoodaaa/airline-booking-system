@@ -16,6 +16,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -90,7 +91,12 @@ public class RequestHashServiceImpl implements RequestHashService {
             );
         }
 
-        private static String trim(String s) { return s == null ? "" : s.trim(); }
-        private static String upper(String s) { return s == null ? "" : s.trim().toUpperCase(); }
+        private static String trim(String s) {
+            return s == null ? "" : s.trim(); }
+        private static String upper(String s) {
+            return s == null
+                    ? ""
+                    : s.trim().toUpperCase(Locale.ROOT);
+        }
     }
 }

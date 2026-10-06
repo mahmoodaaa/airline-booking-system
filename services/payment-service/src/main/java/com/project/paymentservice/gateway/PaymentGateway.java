@@ -4,42 +4,26 @@ import com.project.paymentservice.gateway.exception.GatewayAmbiguousException;
 import com.project.paymentservice.gateway.exception.GatewayDefinitiveException;
 import com.project.paymentservice.gateway.model.CheckoutRequest;
 import com.project.paymentservice.gateway.model.CheckoutResult;
+
 import com.project.paymentservice.enums.PaymentProvider;
 
 /**
  * Provider-neutral payment gateway abstraction.
  *
- * Implementations are responsible for translating between the internal
- * payment domain and a specific external payment provider API.
+ * createCheckout has three outcomes:
  *
- * CONTRACT:
+ * SUCCESS
+ * → returns CheckoutResult
  *
- *   This interface defines exactly three observable outcomes for
- *   {@link #createCheckout}:
+ * DEFINITIVE FAILURE
+ * → GatewayDefinitiveException
  *
- *   ┌─────────────────────────────────────────────────────────┐
- *   │ Outcome           │ Signal                │ Caller maps │
- *   ├─────────────────────────────────────────────────────────┤
- *   │ Success           │ returns result        │ → SUCCEEDED │
- *   │ Definitive fail   │ GatewayDefinitive...  │ → FAILED    │
- *   │ Ambiguous / lost  │ GatewayAmbiguous...   │ → UNKNOWN   │
- *   └─────────────────────────────────────────────────────────┘
+ * AMBIGUOUS OUTCOME
+ * → GatewayAmbiguousException
  *
- * IMPLEMENTATION RULES:
+ * refundFullPayment follows the same three-outcome contract.
  *
- *   1. No @Transactional annotation on implementing classes.
- *      Implementations must NOT participate in any DB transaction.
- *
- *   2. Catch all provider SDK exceptions inside the implementation.
- *      Only GatewayDefinitiveException and GatewayAmbiguousException
- *      must leak out.
- *
- *   3. The providerIdempotencyKey inside requests is stable
- *      across retries. Forward it to the provider
- *      to enable provider-side deduplication.
- *
- *   4. Never modify any DB entity. That is the caller's responsibility
- *      via PaymentTransactionService / RefundTransactionService.
+ * Provider network calls must run outside DB transactions.
  */
 public interface PaymentGateway {
 
@@ -59,4 +43,21 @@ public interface PaymentGateway {
      *                                    (timeout, connection reset, lost response)
      */
     CheckoutResult createCheckout(CheckoutRequest request);
+
+
+    /**
+     * Issues a full refund for a previously captured payment.
+     *
+     * The same {@code idempotencyKey} must be used on every retry
+     * so the provider deduplicates repeated calls safely.
+     *
+     * @param providerPaymentId provider's PaymentIntent / charge identifier
+     * @param idempotencyKey    stable deterministic key; never regenerated across retries
+     * @return providerRefundId from the provider
+     * @throws GatewayDefinitiveException when the provider definitively rejects the refund
+     * @throws GatewayAmbiguousException  when the outcome is unknown
+     */
+    String refundFullPayment(String providerPaymentId, String idempotencyKey);
+
 }
+

@@ -29,6 +29,8 @@ import org.mockito.quality.Strictness;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -59,7 +61,8 @@ class StripePaymentGatewayTest {
     @Mock
     private StripeCheckoutClient stripeCheckoutClient;
 
-
+    @Mock
+    private StripeRefundClient stripeRefundClient;
 
     @Mock
     private StripeProperties stripeProperties;
@@ -76,6 +79,7 @@ class StripePaymentGatewayTest {
         amountConverter = new StripeAmountConverter();
         gateway = new StripePaymentGateway(
                 stripeCheckoutClient,
+                stripeRefundClient,
                 stripeProperties,
                 amountConverter
         );
@@ -238,7 +242,8 @@ class StripePaymentGatewayTest {
                     new BigDecimal("80.00"),
                     "USD",
                     PaymentMethodType.CARD,
-                    idemKey
+                    idemKey,
+                    LocalDateTime.now(ZoneOffset.UTC).plusMinutes(40)
             );
 
             stubSessionSuccess();
@@ -273,7 +278,8 @@ class StripePaymentGatewayTest {
             CheckoutRequest request = new CheckoutRequest(
                     paymentId, attemptId, bookingId,
                     new BigDecimal("200.00"), "USD",
-                    PaymentMethodType.CARD, "idem-key"
+                    PaymentMethodType.CARD, "idem-key",
+                    LocalDateTime.now(ZoneOffset.UTC).plusMinutes(40)
             );
 
             stubSessionSuccess();
@@ -297,7 +303,8 @@ class StripePaymentGatewayTest {
             CheckoutRequest request = new CheckoutRequest(
                     paymentId, UUID.randomUUID(), UUID.randomUUID(),
                     new BigDecimal("75.00"), "USD",
-                    PaymentMethodType.CARD, "idem-key"
+                    PaymentMethodType.CARD, "idem-key",
+                    LocalDateTime.now(ZoneOffset.UTC).plusMinutes(40)
             );
 
             stubSessionSuccess();
@@ -476,7 +483,8 @@ class StripePaymentGatewayTest {
                     UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
                     new BigDecimal("100"), "USD",
                     PaymentMethodType.WALLET,
-                    "idem-key"
+                    "idem-key",
+                    LocalDateTime.now(ZoneOffset.UTC).plusMinutes(40)
             );
 
             assertThatThrownBy(() -> gateway.createCheckout(request))
@@ -491,7 +499,8 @@ class StripePaymentGatewayTest {
                     UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
                     new BigDecimal("100"), "USD",
                     PaymentMethodType.CARD,
-                    "   "
+                    "   ",
+                    LocalDateTime.now(ZoneOffset.UTC).plusMinutes(40)
             );
 
             assertThatThrownBy(() -> gateway.createCheckout(request))
@@ -533,7 +542,8 @@ class StripePaymentGatewayTest {
                 new BigDecimal(amount),
                 currency,
                 PaymentMethodType.CARD,
-                "provider-idem-key-" + UUID.randomUUID()
+                "provider-idem-key-" + UUID.randomUUID(),
+                LocalDateTime.now(ZoneOffset.UTC).plusMinutes(40)
         );
     }
 

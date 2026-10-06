@@ -15,28 +15,20 @@ import java.util.UUID;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class BookingConfirmationOrchestratorImpl
-        implements BookingConfirmationOrchestrator {
+public class BookingConfirmationOrchestratorImpl implements BookingConfirmationOrchestrator {
 
     private final BookingClient bookingClient;
 
     private final PaymentTransactionService paymentTransactionService;
+
+    private final BookingRejectedRefundService bookingRejectedRefundService;
+
 
     @Override
     public void confirmBooking(UUID bookingId, UUID paymentId) {
 
         Objects.requireNonNull(bookingId, "bookingId must not be null");
         Objects.requireNonNull(paymentId, "paymentId must not be null");
-
-
-        // ========================================================
-        // IMPORTANT
-        //
-        // There is intentionally NO @Transactional here.
-        //
-        // Financial truth was already committed before reaching
-        // this orchestrator.
-        // ========================================================
 
 
         try {
@@ -52,86 +44,48 @@ public class BookingConfirmationOrchestratorImpl
 
         } catch (BookingConfirmationRejectedException e) {
 
-            // ====================================================
-            // DEFINITIVE business rejection
-            //
-            // Examples:
-            // EXPIRED / incompatible state / other payment won.
-            //
-            // Money remains SUCCEEDED.
-            // Phase 11 will compensate with technical refund.
-            // ====================================================
-
-            log.warn("Booking definitively rejected payment confirmation. " + "bookingId={} paymentId={} status={} reason={}",
+            log.error(
+                    "CRITICAL: Payment succeeded but Booking definitively rejected confirmation. " +
+                    "bookingId={} paymentId={} status={} reason={}. " +
+                    "Triggering minimal booking-rejection refund.",
                     bookingId,
                     paymentId,
                     e.getStatus(),
                     e.getMessage()
             );
 
+            paymentTransactionService.markBookingRejected(
+                    paymentId,
+                    e.getMessage()
+            );
 
-            persistRejectedWithoutThrowing(paymentId, e.getMessage());
+            bookingRejectedRefundService.refund(paymentId);
+
             return;
 
 
         } catch (BookingIntegrationAmbiguousException e) {
 
-            // ====================================================
-            // UNKNOWN REMOTE OUTCOME
-            //
-            // Timeout / 5xx / connection loss / auth problem.
-            //
-            // NEVER mark REJECTED.
-            // NEVER refund.
-            //
-            // Keep:
-            //
-            // Payment = SUCCEEDED
-            // BookingConfirmationStatus = PENDING
-            //
-            // Reconciliation retries later.
-            // ====================================================
-
             log.error(
                     "Booking confirmation outcome is ambiguous. " +
-                            "bookingId={} paymentId={}",
+                    "bookingId={} paymentId={}",
                     bookingId,
                     paymentId,
                     e
             );
-
 
             persistAmbiguousErrorWithoutThrowing(paymentId, e.getMessage());
 
-
-            return;
-
-
+            throw e;
         } catch (RuntimeException e) {
 
-            // ====================================================
-            // SAFE DEFAULT
-            //
-            // Unexpected application/integration error is NOT proof
-            // of a definitive Booking rejection.
-            //
-            // Therefore treat conservatively as ambiguous.
-            // ====================================================
-
-            log.error(
-                    "CRITICAL unexpected error during Booking confirmation. " +
+            log.error("CRITICAL unexpected error during Booking confirmation. " +
                             "Keeping confirmation PENDING. " +
-                            "bookingId={} paymentId={}",
-                    bookingId,
-                    paymentId,
-                    e
-            );
-
+                            "bookingId={} paymentId={}", bookingId, paymentId, e);
 
             persistAmbiguousErrorWithoutThrowing(paymentId, "Unexpected Booking confirmation error: " + safeMessage(e));
 
-
-            return;
+            throw e;
         }
 
 
@@ -143,9 +97,7 @@ public class BookingConfirmationOrchestratorImpl
         // ========================================================
 
         try {
-
             paymentTransactionService.markBookingConfirmed(paymentId);
-
 
             log.info(
                     "Booking confirmation completed successfully. " +
@@ -154,22 +106,7 @@ public class BookingConfirmationOrchestratorImpl
                     paymentId
             );
 
-
         } catch (RuntimeException e) {
-
-            // ====================================================
-            // Important distributed case:
-            //
-            // Booking may already be CONFIRMED,
-            // but our local TX #2 failed.
-            //
-            // DO NOT fail the financial webhook.
-            // DO NOT undo Payment SUCCEEDED.
-            //
-            // Leave local confirmation PENDING if the transaction
-            // rolled back. Reconciliation will retry the same
-            // idempotent Booking confirmation later.
-            // ====================================================
 
             log.error(
                     "CRITICAL Booking confirmed remotely but local " +
@@ -179,48 +116,17 @@ public class BookingConfirmationOrchestratorImpl
                     paymentId,
                     e
             );
-
-
             persistAmbiguousErrorWithoutThrowing(
                     paymentId,
                     "Booking confirmation succeeded remotely, "
                             + "but local finalization failed: "
                             + safeMessage(e)
             );
+            throw e;
         }
     }
 
-
-
-
-
-    private void persistRejectedWithoutThrowing(UUID paymentId, String reason) {
-
-        try {
-
-            paymentTransactionService.markBookingRejected(paymentId, reason);
-
-
-        } catch (RuntimeException persistenceError) {
-
-            /*
-             * Financial truth is already durable.
-             *
-             * Never propagate this back into the Stripe webhook path.
-             * Reconciliation can retry Booking confirmation later
-             * while local status remains PENDING.
-             */
-
-            log.error(
-                    "CRITICAL failed to persist Booking REJECTED state. " +
-                            "paymentId={}",
-                    paymentId,
-                    persistenceError
-            );
-        }
-    }
-
-
+    // ============================================================
     private void persistAmbiguousErrorWithoutThrowing(UUID paymentId, String error) {
 
         try {
@@ -242,7 +148,6 @@ public class BookingConfirmationOrchestratorImpl
                     "CRITICAL failed to persist Booking confirmation " + "error metadata. paymentId={}", paymentId, persistenceError);
         }
     }
-
 
     private String safeMessage(Throwable throwable) {
 

@@ -5,11 +5,10 @@ import com.project.bookingservice.enums.Currency;
 import com.project.bookingservice.enums.FareClassType;
 import jakarta.persistence.*;
 import lombok.*;
-import org.hibernate.annotations.CreationTimestamp;
-import org.hibernate.annotations.UpdateTimestamp;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -24,10 +23,6 @@ import java.util.UUID;
                 )
         },
         indexes = {
-                @Index(
-                        name = "idx_booking_status_expires",
-                        columnList = "status, expires_at"
-                ),
                 @Index(
                         name = "idx_booking_user_created",
                         columnList = "user_id, created_at"
@@ -124,9 +119,18 @@ public class Booking {
     @Column(name = "status", nullable = false, length = 20)
     private BookingStatus status;
 
-    // null during IN_PROGRESS
+// Effective reservation lease deadline.
+//
+// PENDING:
+//   normal booking reservation TTL.
+//
+// PAYMENT_PENDING:
+//   protected payment window deadline.
+//
+// null during IN_PROGRESS.
     @Column(name = "expires_at")
     private LocalDateTime expiresAt;
+
 
     // -----------------------------------
     // Idempotency
@@ -159,7 +163,6 @@ public class Booking {
     // Audit
     // -----------------------------------
 
-    @CreationTimestamp
     @Column(
             name = "created_at",
             nullable = false,
@@ -167,12 +170,25 @@ public class Booking {
     )
     private LocalDateTime createdAt;
 
-    @UpdateTimestamp
     @Column(
             name = "updated_at",
             nullable = false
     )
     private LocalDateTime updatedAt;
+
+    @PrePersist
+    protected void onCreate() {
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+        if (createdAt == null) {
+            createdAt = now;
+        }
+        updatedAt = now;
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now(ZoneOffset.UTC);
+    }
 
     // -----------------------------------
     // Passengers

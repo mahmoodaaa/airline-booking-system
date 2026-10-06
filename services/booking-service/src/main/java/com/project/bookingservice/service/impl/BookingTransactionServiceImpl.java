@@ -51,7 +51,7 @@ public class BookingTransactionServiceImpl implements BookingTransactionService 
                 bookingId,
                 expectedStatus,
                 newStatus,
-                java.time.LocalDateTime.now()
+                java.time.LocalDateTime.now(java.time.ZoneOffset.UTC)
         );
 
         return updatedRows == 1;
@@ -59,8 +59,32 @@ public class BookingTransactionServiceImpl implements BookingTransactionService 
 
     @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public boolean confirmPayment(UUID bookingId, UUID paymentId, LocalDateTime confirmedAt) {
-        int updatedRows = bookingRepository.confirmPayment(bookingId, paymentId, confirmedAt, confirmedAt);
-        return updatedRows > 0;
+    public boolean confirmPayment(UUID bookingId, UUID paymentId, LocalDateTime now) {
+
+        int updatedRows = bookingRepository.confirmPayment(
+                bookingId,
+                paymentId,
+                BookingStatus.PAYMENT_PENDING,
+                BookingStatus.CONFIRMED,
+                now
+        );
+
+        return updatedRows == 1;
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public boolean startPaymentWindow(UUID bookingId, UUID userId, LocalDateTime newExpiresAt, LocalDateTime now) {
+
+        int updatedRows = bookingRepository.startPaymentWindow(
+                bookingId,
+                userId,
+                BookingStatus.PENDING,
+                BookingStatus.PAYMENT_PENDING,
+                newExpiresAt,
+                now
+        );
+
+        return updatedRows == 1;
     }
 }

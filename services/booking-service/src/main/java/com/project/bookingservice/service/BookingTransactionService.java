@@ -34,9 +34,29 @@ public interface BookingTransactionService {
     boolean transitionStatus(UUID bookingId, BookingStatus expectedStatus, BookingStatus newStatus);
 
     /**
-     * Atomic state transition for confirming a payment:
-     * UPDATE WHERE status = PENDING. Sets status to CONFIRMED,
-     * updates paymentId and confirmedAt.
+     * Atomically confirms a financially successful payment.
+     * <p>
+     * Rules:
+     * - current status must be PAYMENT_PENDING
+     * - effective expiresAt must still be > now
+     * - sets paymentId + confirmedAt
      */
-    boolean confirmPayment(UUID bookingId, UUID paymentId, LocalDateTime confirmedAt);
+    boolean confirmPayment(UUID bookingId, UUID paymentId, LocalDateTime now);
+
+    /**
+     * Atomically starts the protected payment window.
+     * <p>
+     * PENDING -> PAYMENT_PENDING
+     * <p>
+     * Rules:
+     * - booking belongs to userId
+     * - status is PENDING
+     * - current expiresAt > now
+     * - replaces expiresAt with newExpiresAt exactly once
+     * <p>
+     * Already PAYMENT_PENDING is handled by BookingService
+     * as an idempotent replay and MUST NOT extend expiresAt.
+     */
+    boolean startPaymentWindow(UUID bookingId, UUID userId, LocalDateTime newExpiresAt, LocalDateTime now);
+
 }

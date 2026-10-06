@@ -21,6 +21,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Optional;
@@ -38,6 +39,8 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
                     PaymentAttemptStatus.OPEN,
                     PaymentAttemptStatus.UNKNOWN
             );
+
+
 
     private final PaymentIdempotencyRecordRepository idempotencyRepository;
     private final PaymentRepository paymentRepository;
@@ -72,13 +75,16 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
         }
 
         UUID recordId = UUID.randomUUID();
+        java.time.LocalDateTime now = java.time.LocalDateTime.now(java.time.ZoneOffset.UTC);
 
         int inserted = idempotencyRepository.insertIfAbsent(
                 recordId,
                 userId,
                 idempotencyKeyHash,
                 requestHash,
-                bookingId
+                bookingId,
+                now,
+                now
         );
 
         if (inserted == 1) {
@@ -145,8 +151,9 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
         }
 
         UUID paymentId = UUID.randomUUID();
+        java.time.LocalDateTime now = java.time.LocalDateTime.now(java.time.ZoneOffset.UTC);
 
-        paymentRepository.insertIfAbsent(paymentId, bookingId, userId, amount, currency);
+        paymentRepository.insertIfAbsent(paymentId, bookingId, userId, amount, currency, now, now);
 
         Payment payment = paymentRepository.findByBookingId(bookingId)
                 .orElseThrow(() -> new IllegalStateException("Payment missing after get-or-create operation"));
@@ -186,7 +193,8 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
             UUID paymentId,
             UUID idempotencyRecordId,
             PaymentProvider provider,
-            PaymentMethodType paymentMethod
+            PaymentMethodType paymentMethod,
+            LocalDateTime latestCheckoutStartAt
     ) {
 
         // ============================================================
@@ -250,8 +258,7 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
         // successful attempt.
         // ============================================================
 
-        if (payment.getStatus() == PaymentStatus.SUCCEEDED || payment.getStatus() == PaymentStatus.REFUNDED) {
-
+        if (payment.getStatus() == PaymentStatus.SUCCEEDED) {
             UUID succeededAttemptId = payment.getSucceededAttemptId();
 
 
@@ -452,7 +459,19 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
         // ============================================================
         // 8. No active Attempt
         //
-        // Create the durable INITIALIZING claim.
+        // Previous attempts may be FAILED / EXPIRED.
+        // Check if there is enough time left in the Booking window.
+        // ============================================================
+
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
+        if (!now.isBefore(latestCheckoutStartAt)) {
+            log.warn("Cannot create a new PaymentAttempt for paymentId {}. Not enough time remaining. now={} latestCheckoutStartAt={}",
+                    paymentId, now, latestCheckoutStartAt);
+            throw new ConflictException("Not enough time remaining to retry payment. Please create a new booking.");
+        }
+
+        // ============================================================
+        // 9. Create the durable INITIALIZING claim.
         //
         // providerIdempotencyKey is generated ONCE and persisted before
         // any external provider network call.
@@ -466,20 +485,19 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
                         .status(PaymentAttemptStatus.INITIALIZING)
                         .build();
 
-
         attempt = attemptRepository.saveAndFlush(attempt);
 
 
         // ============================================================
-        // 9. Permanently bind this client Idempotency-Key
-        //    to this Payment + Attempt
+        // 10. Permanently bind this client Idempotency-Key
+        //     to this Payment + Attempt
         // ============================================================
 
         bindIdempotencyRecord(idempotencyRecord, payment, attempt);
 
 
         // ============================================================
-        // 10. Return ownership of provider initiation
+        // 11. Return ownership of provider initiation
         //
         // true means:
         //
@@ -551,7 +569,7 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
             LocalDateTime providerExpiresAt
     ) {
 
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
 
         int updated = attemptRepository.markOpen(
                 attemptId,
@@ -725,7 +743,7 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public PaymentAttempt markAttemptUnknown(UUID attemptId, String failureReason) {
 
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
 
         attemptRepository.markUnknown(
                 attemptId,
@@ -758,7 +776,7 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public PaymentAttempt markAttemptFailed(UUID attemptId, String failureReason) {
 
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
 
         int updated = attemptRepository.markFailed(
                 attemptId,
@@ -1151,7 +1169,7 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
             log.info("Payment succeeded with canonical attempt. " + "paymentId={} attemptId={} bookingId={}", paymentId, attemptId, bookingId);
 
 
-            return new PaymentSuccessResult(paymentId, bookingId, attemptId, true, true);
+            return new PaymentSuccessResult(paymentId, bookingId, attemptId, true);
         }
 
 
@@ -1177,7 +1195,7 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
                         "Idempotent webhook replay for canonical successful attempt. " + "paymentId={} attemptId={}", paymentId, attemptId);
 
 
-                return new PaymentSuccessResult(paymentId, bookingId, attemptId, true, true);
+                return new PaymentSuccessResult(paymentId, bookingId, attemptId, true);
             }
 
 
@@ -1191,8 +1209,9 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
             //
             // Stripe says this Attempt also received money.
             //
-            // Later Phase 11:
-            // technical refund for this non-canonical success.
+            // Non-canonical financial success is an exceptional
+            // financial inconsistency requiring operational handling.
+            // Do not overwrite the canonical successful Attempt.
             // ====================================================
 
             log.error(
@@ -1204,45 +1223,10 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
             );
 
 
-            return new PaymentSuccessResult(paymentId, bookingId, attemptId, false, false);
+            return new PaymentSuccessResult(paymentId, bookingId, attemptId, false);
 
         }
-
-
-        // ========================================================
-        // REFUNDED Payment
-        //
-        // We do not rewrite historical payment state here.
-        // Refund-specific behavior will be finalized in Phase 11.
-        // ========================================================
-
-        if (payment.getStatus() == PaymentStatus.REFUNDED) {
-
-            log.error(
-                    "CRITICAL provider success received for already REFUNDED Payment. " +
-                            "paymentId={} attemptId={} canonicalAttemptId={}",
-                    paymentId,
-                    attemptId,
-                    canonicalAttemptId
-            );
-
-            /*
-             * Financial truth for the Attempt was already persisted above.
-             *
-             * Do not change Payment back to SUCCEEDED.
-             */
-
-            boolean canonical = Objects.equals(canonicalAttemptId, attemptId);
-
-            return new PaymentSuccessResult(
-                    paymentId,
-                    bookingId,
-                    attemptId,
-                    canonical,
-                    false
-            );
-        }
-
+        
 
         throw new IllegalStateException(
                 "Unsupported Payment status during webhook success: "
@@ -1415,7 +1399,7 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
                 "paymentId must not be null"
         );
 
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
 
 
         // ========================================================
@@ -1788,6 +1772,252 @@ public class PaymentTransactionServiceImpl implements PaymentTransactionService 
          * Payment.bookingConfirmationLastError
          * has length = 500.
          */
+        return normalized.length() <= 500 ? normalized : normalized.substring(0, 500);
+    }
+
+
+    // =========================================================
+    // Refund — booking-rejection compensation
+    // =========================================================
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public Optional<Payment> claimRejectedBookingRefund(UUID paymentId) {
+
+        Objects.requireNonNull(paymentId, "paymentId must not be null");
+
+
+        // --------------------------------------------------------
+        // 1. Lock Payment row.
+        // --------------------------------------------------------
+
+        Payment payment = paymentRepository.findByIdForUpdate(paymentId)
+                .orElseThrow(() -> new RecordNotFoundException("Payment not found: " + paymentId));
+
+
+        // --------------------------------------------------------
+        // 2. Verify preconditions.
+        //
+        // We only refund when:
+        //   - Payment financially succeeded (real money captured)
+        //   - Booking definitively rejected (not ambiguous)
+        //   - A canonical successful attempt exists
+        // --------------------------------------------------------
+
+        if (payment.getStatus() != PaymentStatus.SUCCEEDED) {
+
+            log.warn(
+                    "claimRejectedBookingRefund: Payment {} is not SUCCEEDED (status={}). Skipping.",
+                    paymentId,
+                    payment.getStatus()
+            );
+
+            return Optional.empty();
+        }
+
+        if (payment.getBookingConfirmationStatus() != BookingConfirmationStatus.REJECTED) {
+
+            log.warn(
+                    "claimRejectedBookingRefund: Payment {} BookingConfirmationStatus is not REJECTED (status={}). Skipping.",
+                    paymentId,
+                    payment.getBookingConfirmationStatus()
+            );
+
+            return Optional.empty();
+        }
+
+        if (payment.getSucceededAttemptId() == null) {
+
+            log.error(
+                    "CRITICAL: claimRejectedBookingRefund: SUCCEEDED Payment {} has no succeededAttemptId. Skipping.",
+                    paymentId
+            );
+
+            return Optional.empty();
+        }
+
+
+        // --------------------------------------------------------
+        // 3. Guard on current RefundStatus.
+        // --------------------------------------------------------
+
+        RefundStatus currentRefundStatus = payment.getRefundStatus();
+
+        switch (currentRefundStatus) {
+
+            case SUCCEEDED -> {
+                log.info(
+                        "claimRejectedBookingRefund: Refund already SUCCEEDED for paymentId={}. No-op.",
+                        paymentId
+                );
+                return Optional.empty();
+            }
+
+            case FAILED -> {
+                log.error(
+                        "CRITICAL: claimRejectedBookingRefund: Refund is FAILED for paymentId={}. Manual intervention required.",
+                        paymentId
+                );
+                return Optional.empty();
+            }
+
+            case PENDING -> {
+
+                LocalDateTime staleBefore = LocalDateTime.now(ZoneOffset.UTC).minusMinutes(5);
+
+                if (payment.getUpdatedAt() != null && payment.getUpdatedAt().isBefore(staleBefore)) {
+
+                    log.warn("Reclaiming stale PENDING refund. paymentId={}", paymentId);
+                    break;
+                }
+                return Optional.empty();
+            }
+
+            // NOT_STARTED and UNKNOWN are eligible for a (re-)attempt.
+            case NOT_STARTED, UNKNOWN -> {
+                // Fall through to claim below.
+            }
+        }
+
+
+        // --------------------------------------------------------
+        // 4. Transition -> PENDING and commit before Stripe call.
+        // --------------------------------------------------------
+
+        payment.setRefundStatus(RefundStatus.PENDING);
+
+        paymentRepository.saveAndFlush(payment);
+
+        log.info(
+                "claimRejectedBookingRefund: Claimed refund PENDING for paymentId={} (previousStatus={}).",
+                paymentId,
+                currentRefundStatus
+        );
+
+        return Optional.of(payment);
+    }
+
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public Payment markRefundSucceeded(UUID paymentId, String providerRefundId) {
+
+        Objects.requireNonNull(paymentId, "paymentId must not be null");
+
+        if (providerRefundId == null || providerRefundId.isBlank()) {
+            throw new IllegalArgumentException("providerRefundId must not be blank");
+        }
+
+        Payment payment = paymentRepository.findByIdForUpdate(paymentId)
+                .orElseThrow(() -> new RecordNotFoundException("Payment not found: " + paymentId));
+
+        if (payment.getRefundStatus() != RefundStatus.PENDING) {
+            log.error(
+                    "markRefundSucceeded: Expected PENDING but was {} for paymentId={}.",
+                    payment.getRefundStatus(),
+                    paymentId
+            );
+            throw new IllegalStateException(
+                    "Cannot mark refund SUCCEEDED: current refundStatus is " + payment.getRefundStatus()
+            );
+        }
+
+        payment.setRefundStatus(RefundStatus.SUCCEEDED);
+        payment.setProviderRefundId(providerRefundId);
+        payment.setRefundedAt(LocalDateTime.now(ZoneOffset.UTC));
+        payment.setRefundLastError(null);
+
+        payment = paymentRepository.saveAndFlush(payment);
+
+        log.info(
+                "Refund SUCCEEDED. paymentId={} providerRefundId={}",
+                paymentId,
+                providerRefundId
+        );
+
+        return payment;
+    }
+
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public Payment markRefundUnknown(UUID paymentId, String error) {
+
+        Objects.requireNonNull(paymentId, "paymentId must not be null");
+
+        Payment payment = paymentRepository.findByIdForUpdate(paymentId)
+                .orElseThrow(() -> new RecordNotFoundException("Payment not found: " + paymentId));
+
+        if (payment.getRefundStatus() != RefundStatus.PENDING) {
+            log.error(
+                    "markRefundUnknown: Expected PENDING but was {} for paymentId={}.",
+                    payment.getRefundStatus(),
+                    paymentId
+            );
+            throw new IllegalStateException(
+                    "Cannot mark refund UNKNOWN: current refundStatus is " + payment.getRefundStatus()
+            );
+        }
+
+        payment.setRefundStatus(RefundStatus.UNKNOWN);
+        payment.setRefundLastError(sanitizeRefundError(error));
+
+        payment = paymentRepository.saveAndFlush(payment);
+
+        log.warn(
+                "Refund outcome UNKNOWN. paymentId={} error={}",
+                paymentId,
+                error
+        );
+
+        return payment;
+    }
+
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public Payment markRefundFailed(UUID paymentId, String error) {
+
+        Objects.requireNonNull(paymentId, "paymentId must not be null");
+
+        Payment payment = paymentRepository.findByIdForUpdate(paymentId)
+                .orElseThrow(() -> new RecordNotFoundException("Payment not found: " + paymentId));
+
+        if (payment.getRefundStatus() != RefundStatus.PENDING) {
+            log.error(
+                    "markRefundFailed: Expected PENDING but was {} for paymentId={}.",
+                    payment.getRefundStatus(),
+                    paymentId
+            );
+            throw new IllegalStateException(
+                    "Cannot mark refund FAILED: current refundStatus is " + payment.getRefundStatus()
+            );
+        }
+
+        payment.setRefundStatus(RefundStatus.FAILED);
+        payment.setRefundLastError(sanitizeRefundError(error));
+
+        payment = paymentRepository.saveAndFlush(payment);
+
+        log.error(
+                "CRITICAL: Refund FAILED definitively. Manual intervention required. paymentId={} error={}",
+                paymentId,
+                error
+        );
+
+        return payment;
+    }
+
+
+    private String sanitizeRefundError(String error) {
+
+        if (error == null || error.isBlank()) {
+            return "Refund failed";
+        }
+
+        String normalized = error.trim();
+
+        // Payment.refundLastError has length = 500.
         return normalized.length() <= 500 ? normalized : normalized.substring(0, 500);
     }
 }
